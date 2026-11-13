@@ -181,3 +181,35 @@ func power_for_speed(speed: float, mass: float, surface: SurfaceParams, grade: f
 ## Расход на этой скорости, кг/мин.
 func consumption_for_speed(speed: float, mass: float, surface: SurfaceParams, grade: float = 0.0) -> float:
 	return engine.fuel_for_work(power_for_speed(speed, mass, surface, grade)) * 60.0
+
+
+## Скорость, достижимая при этом расходе (кг/мин) на этом уклоне и покрытии, м/с.
+func speed_for_consumption(rate_kg_min: float, mass: float, surface: SurfaceParams, grade: float = 0.0) -> float:
+	var power: float = rate_kg_min / 60.0 / params.fuel_per_joule
+	if power <= 0.0:
+		return 0.0
+	var low: float = 0.0
+	var high: float = 150.0
+	for i in 40:
+		var middle: float = (low + high) * 0.5
+		if resistance_force(middle, mass, surface, grade) * middle > power:
+			high = middle
+		else:
+			low = middle
+	return low
+
+
+## Запас хода, м: сколько машина проедет на этом топливе с этой скоростью
+## по такому же покрытию и уклону. Учитывает, что машина легчает.
+func range_at_speed(speed: float, fuel: float, surface: SurfaceParams, grade: float = 0.0) -> float:
+	if fuel <= 0.0 or speed <= 0.0:
+		return 0.0
+	var per_kg: float = (surface.rolling_coefficient + grade) * params.gravity
+	var empty_force: float = aero.drag(speed) + per_kg * params.dry_mass
+	if empty_force + per_kg * fuel <= 0.0:
+		return INF
+	if absf(per_kg) < 0.000001:
+		return fuel / (params.fuel_per_joule * empty_force)
+	if empty_force <= 0.0:
+		return INF
+	return log(1.0 + per_kg * fuel / empty_force) / (per_kg * params.fuel_per_joule)

@@ -4,11 +4,13 @@ extends RefCounted
 ##
 ## Данные команды лежат в a и b:
 ##   MANUAL      a — руль от -1 до 1, b — газ и тормоз от -1 до 1; нули — «отпущено»
-##   SET_TARGET  a — режим (0 скорость, 1 расход), b — значение        (шаг 2)
+##   SET_TARGET  a — режим TargetMode, b — значение: км/ч или кг/мин
 ##   SET_COURSE  a — курс в градусах, active = false — «не задан»      (шаг 3)
 ##   SET_POINT   a — восток, b — север, active = false — «нет точки»   (шаг 4)
 
 enum Type { MANUAL, SET_TARGET, SET_COURSE, SET_POINT }
+## Режим удержания для SET_TARGET.
+enum TargetMode { SPEED, CONSUMPTION }
 
 ## Номер шага симуляции, на котором команда принята. Ставит RaceSim.
 var step_index: int = 0

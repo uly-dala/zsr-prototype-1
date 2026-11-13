@@ -1,5 +1,5 @@
 extends RefCounted
-## Автопроверки шагов 0 и 1. Запускаются без окна: см. run_checks.bat.
+## Автопроверки шагов 0–2. Запускаются без окна: см. run_checks.bat.
 ##
 ## Ожидаемые числа взяты из таблиц дизайн-документа (разделы 3.4, 3.5, 4.2, 6, 7.1)
 ## и из независимого расчёта той же модели.
@@ -60,6 +60,12 @@ func run() -> void:
 	_test_commands_and_determinism()
 	_section("Камера (7.1)")
 	_test_camera()
+	_section("Запас хода (6)")
+	_test_range()
+	_section("Удержание скорости и расхода (3.3)")
+	_test_hold()
+	_section("Приоритет WASD над автоматикой (3.2)")
+	_test_manual_priority()
 
 
 # --- Проверки ---------------------------------------------------------------
@@ -277,6 +283,107 @@ func _test_camera() -> void:
 	camera.update(0.4)
 	_true("Shift+щелчок: стандартное положение сброшено", camera.car_frac.is_equal_approx(Vector2(0.5, 0.75)))
 	_true("метка стандартного положения показана", camera.marker_time_left > 0.0)
+
+
+func _test_range() -> void:
+	var speeds_kmh: Array = [72.0, 90.0, 108.0, 126.0]
+	var fuels: Array = [300.0, 400.0, 500.0]
+	var table: Array = [[10.4, 13.5, 16.6], [8.4, 11.0, 13.5], [6.8, 9.0, 11.1], [5.6, 7.4, 9.1]]
+	for i in speeds_kmh.size():
+		for j in fuels.size():
+			_near("%d км/ч, %d кг, км" % [int(speeds_kmh[i]), int(fuels[j])],
+				_sim.range_at_speed(speeds_kmh[i] / 3.6, fuels[j], _hard) / 1000.0, table[i][j], 0.1)
+	_near("песок, 108 км/ч, полный бак, км", _sim.range_at_speed(V108, 500.0, _sand) / 1000.0, 7.2, 0.1)
+	_near("пустой бак, км", _sim.range_at_speed(V108, 0.0, _hard), 0.0, 0.0)
+	_near("скорость при 80 кг/мин и 1250 кг, км/ч", _sim.speed_for_consumption(80.0, 1250.0, _hard) * 3.6, 107.0, 0.5)
+
+
+func _test_hold() -> void:
+	# Держать скорость 110 км/ч с места.
+	var race: RaceSim = _new_race(250.0, 0.0)
+	var car = race.cars[0]
+	race.submit(Command.new(Command.Type.SET_TARGET, 0, Command.TargetMode.SPEED, 110.0))
+	_steps(race, 1800)
+	_near("скорость: держит 110 км/ч", car.state.speed() * 3.6, 110.0, 0.3)
+	_near("скорость: расход как по запросу к модели, кг/мин", car.state.consumption,
+		_sim.consumption_for_speed(110.0 / 3.6, car.state.mass, _hard), 1.0)
+	_true("скорость: газом управляет автоматика", car.auto_throttle)
+	# Снизить до 60 км/ч: автоматика тормозит.
+	race.submit(Command.new(Command.Type.SET_TARGET, 0, Command.TargetMode.SPEED, 60.0))
+	_steps(race, 600)
+	_near("скорость: снизила до 60 км/ч", car.state.speed() * 3.6, 60.0, 0.3)
+	# Ноль: остановка.
+	race.submit(Command.new(Command.Type.SET_TARGET, 0, Command.TargetMode.SPEED, 0.0))
+	_steps(race, 600)
+	_true("скорость: при нуле машина стоит", car.state.speed() == 0.0)
+	# Пределы заданного значения.
+	race.submit(Command.new(Command.Type.SET_TARGET, 0, Command.TargetMode.SPEED, 500.0))
+	_near("скорость: предел 140 км/ч", car.target_value, 140.0, 0.0)
+	race.submit(Command.new(Command.Type.SET_TARGET, 0, Command.TargetMode.CONSUMPTION, 500.0))
+	_near("расход: предел 150 кг/мин", car.target_value, 150.0, 0.0)
+
+	# Держать скорость на песке: расход растёт.
+	var on_sand: RaceSim = RaceSim.new(FlatTerrain.new(_sand))
+	on_sand.add_car(_params, 250.0, 0.0, 0.0, 0.0)
+	on_sand.submit(Command.new(Command.Type.SET_TARGET, 0, Command.TargetMode.SPEED, 110.0))
+	_steps(on_sand, 1800)
+	_near("песок: держит 110 км/ч", on_sand.cars[0].state.speed() * 3.6, 110.0, 0.3)
+	_true("песок: расход выше, чем на грунте", on_sand.cars[0].state.consumption > 100.0)
+
+	# Держать расход 80 кг/мин.
+	var eco: RaceSim = _new_race(250.0, 0.0)
+	var eco_car = eco.cars[0]
+	eco.submit(Command.new(Command.Type.SET_TARGET, 0, Command.TargetMode.CONSUMPTION, 80.0))
+	_steps(eco, 3600)
+	_near("расход: держит 80 кг/мин", eco_car.state.consumption, 80.0, 0.5)
+	_near("расход: скорость как по запросу к модели, км/ч", eco_car.state.speed() * 3.6,
+		_sim.speed_for_consumption(80.0, eco_car.state.mass, _hard) * 3.6, 4.0)
+	var speed_before: float = eco_car.state.speed()
+	_steps(eco, 3600)
+	_true("расход: скорость растёт по мере выгорания топлива", eco_car.state.speed() > speed_before)
+	eco.submit(Command.new(Command.Type.SET_TARGET, 0, Command.TargetMode.CONSUMPTION, 0.0))
+	_steps(eco, 60)
+	_true("расход: при нуле двигатель не тянет", eco_car.state.thrust == 0.0 and eco_car.state.consumption == 0.0)
+
+
+func _test_manual_priority() -> void:
+	var race: RaceSim = _new_race(250.0, 0.0)
+	var car = race.cars[0]
+	race.submit(Command.new(Command.Type.SET_TARGET, 0, Command.TargetMode.SPEED, 110.0))
+	_steps(race, 1800)
+	# Только руль: автоматика продолжает держать скорость.
+	race.submit(Command.new(Command.Type.MANUAL, 0, 0.3, 0.0))
+	_steps(race, 120)
+	_true("только руль: газ остаётся у автоматики", car.auto_throttle and car.is_manual_active())
+	_near("только руль: скорость держится, км/ч", car.state.speed() * 3.6, 110.0, 0.5)
+	_true("только руль: машина повернула", car.state.heading > 0.05)
+	# Тормоз вручную, затем отпустить.
+	race.submit(Command.new(Command.Type.MANUAL, 0, 0.0, -1.0))
+	_steps(race, 60)
+	_true("S: тормозит игрок", not car.auto_throttle and car.state.speed() * 3.6 < 90.0)
+	race.submit(Command.new(Command.Type.MANUAL, 0, 0.0, 0.0))
+	_steps(race, 12)
+	_true("после отпускания: 0,2 с газ ещё не у автоматики", not car.auto_throttle and car.state.thrust == 0.0)
+	_steps(race, 12)
+	_true("после отпускания: через 0,4 с автоматика вернула газ", car.auto_throttle and car.state.thrust > 0.0)
+	_steps(race, 900)
+	_near("после отпускания: скорость восстановлена, км/ч", car.state.speed() * 3.6, 110.0, 0.3)
+	# Полный газ вручную сильнее автоматики.
+	race.submit(Command.new(Command.Type.MANUAL, 0, 0.0, 1.0))
+	_steps(race, 300)
+	_true("W: разгон выше заданной скорости", car.state.speed() * 3.6 > 125.0)
+
+
+func _new_race(fuel: float, speed: float) -> RaceSim:
+	var race: RaceSim = RaceSim.new(FlatTerrain.new(_hard))
+	var car = race.add_car(_params, fuel, 0.0, 0.0, 0.0)
+	car.state.set_motion(0.0, speed)
+	return race
+
+
+func _steps(race: RaceSim, count: int) -> void:
+	for i in count:
+		race.step()
 
 
 # --- Вспомогательное --------------------------------------------------------

@@ -4,10 +4,11 @@ extends RefCounted
 ## в собранной игре — в user://logs.
 
 const Car = preload("res://src/race/car.gd")
+const Command = preload("res://src/sim/command.gd")
 
 ## Строка пишется раз в столько шагов: 6 шагов — 10 строк в секунду.
 const SAMPLE_EVERY: int = 6
-const HEADER: String = "step,time_s,x_m,y_m,heading_deg,speed_kmh,fuel_kg,mass_kg,consumption_kg_min,control,steer,throttle,lateral_ratio,surface,map_open"
+const HEADER: String = "step,time_s,x_m,y_m,heading_deg,speed_kmh,fuel_kg,mass_kg,consumption_kg_min,control,steer,throttle,lateral_ratio,surface,map_open,target_mode,target_value,auto_throttle"
 
 var path: String = ""
 var _file: FileAccess = null
@@ -47,8 +48,11 @@ func sample(step_index: int, time_s: float, car: Car, surface_id: String, map_op
 	var control: String = "auto"
 	if car.is_manual_active():
 		control = "manual"
-	_file.store_line("%d,%.3f,%.2f,%.2f,%.2f,%.2f,%.2f,%.1f,%.2f,%s,%.2f,%.2f,%.3f,%s,%d" % [
+	var mode: String = "speed"
+	if car.target_mode == Command.TargetMode.CONSUMPTION:
+		mode = "consumption"
+	_file.store_line("%d,%.3f,%.2f,%.2f,%.2f,%.2f,%.2f,%.1f,%.2f,%s,%.2f,%.2f,%.3f,%s,%d,%s,%.1f,%d" % [
 		step_index, time_s, s.x, s.y, s.heading_deg(), s.speed() * 3.6, s.fuel, s.mass,
 		s.consumption, control, s.steer, car.manual.throttle, s.lateral_ratio, surface_id,
-		1 if map_open else 0,
+		1 if map_open else 0, mode, car.target_value, 1 if car.auto_throttle else 0,
 	])

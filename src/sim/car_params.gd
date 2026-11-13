@@ -41,3 +41,21 @@ extends Resource
 @export var autopilot_lateral_share: float = 0.4
 ## Потеря скорости на пределе сцепления при ручном манёвре, м/с за секунду.
 @export var manual_scrub_decel: float = 4.0
+## Через сколько секунд после отпускания W или S автоматика возвращает газ.
+@export var manual_release_delay: float = 0.3
+
+@export_group("Удержание скорости и расхода")
+## Шаг заданной скорости, км/ч.
+@export var target_speed_step: float = 5.0
+## Наибольшая заданная скорость, км/ч.
+@export var target_speed_max: float = 140.0
+## Шаг заданного расхода, кг/мин.
+@export var target_consumption_step: float = 5.0
+## Наибольший заданный расход, кг/мин.
+@export var target_consumption_max: float = 150.0
+## Насколько резко автоматика догоняет заданную скорость: м/с² на 1 м/с ошибки.
+@export var autopilot_speed_gain: float = 0.8
+## Наибольший разгон автоматики, м/с² (допущение).
+@export var autopilot_max_accel: float = 3.0
+## Наибольшее торможение автоматики, м/с² (допущение).
+@export var autopilot_max_brake: float = 3.0

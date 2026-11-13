@@ -1,8 +1,8 @@
 extends Node2D
 ## Сцена заезда.
 ##
-## Шаг 1 дизайн-документа: одна машина на пустой плоскости, WASD,
-## силы и масса, сдвиг и зум камеры.
+## Шаги 1 и 2 дизайн-документа: одна машина на пустой плоскости, WASD,
+## силы и масса, камера, удержание скорости и расхода, экран заезда.
 ##
 ## Узел только связывает части между собой:
 ##   ввод игрока -> команды -> RaceSim (фиксированный шаг 60 раз в секунду)
@@ -21,6 +21,7 @@ const GroundGrid = preload("res://src/view/ground_grid.gd")
 const CarView = preload("res://src/view/car_view.gd")
 const TrailView = preload("res://src/view/trail_view.gd")
 const Hud = preload("res://src/ui/hud.gd")
+const Command = preload("res://src/sim/command.gd")
 
 const CAR_PARAMS_PATH: String = "res://data/car_default.tres"
 const CAMERA_PARAMS_PATH: String = "res://data/camera_default.tres"
@@ -33,6 +34,9 @@ const SURFACE_PATHS: Array = [
 const TRAIL_EVERY: int = 6
 ## Отладка: шаг изменения топлива клавишами [ и ], кг.
 const DEBUG_FUEL_STEP: float = 50.0
+## Вращение колеса не учитывается, пока колесо нажато и столько секунд после
+## отпускания: иначе возврат камеры случайно менял бы заданную скорость (7.1).
+const WHEEL_GUARD_TIME: float = 0.15
 
 ## Топливо на старте, кг. 250 кг — полбака, «средняя масса» из документа.
 @export_range(0.0, 500.0, 50.0) var start_fuel: float = 250.0
@@ -66,6 +70,9 @@ var _show_details: bool = true
 var _middle_down: bool = false
 var _middle_dragging: bool = false
 var _middle_press_pos: Vector2 = Vector2.ZERO
+var _middle_release_msec: int = -100000
+## Показание пройденного пути, от которого считает одометр, м.
+var _odometer_zero: float = 0.0
 
 
 func _ready() -> void:
@@ -111,6 +118,7 @@ func _start_race() -> void:
 	_player = _sim.add_car(_car_params, start_fuel, 0.0, 0.0, 0.0)
 	_player.sim.burn_fuel = _burn_fuel
 	_player_input = PlayerInput.new(_player.id)
+	_odometer_zero = 0.0
 	_store_previous()
 	_trail.clear()
 	_trail.add_point(Vector2.ZERO)
@@ -176,6 +184,10 @@ func _unhandled_input(event: InputEvent) -> void:
 		var button: InputEventMouseButton = event as InputEventMouseButton
 		if button.button_index == MOUSE_BUTTON_MIDDLE:
 			_on_middle_button(button)
+		elif button.pressed and button.button_index == MOUSE_BUTTON_WHEEL_UP:
+			_on_wheel(1)
+		elif button.pressed and button.button_index == MOUSE_BUTTON_WHEEL_DOWN:
+			_on_wheel(-1)
 	elif event is InputEventMouseMotion:
 		if _middle_down:
 			_on_middle_motion(event as InputEventMouseMotion)
@@ -191,6 +203,10 @@ func _on_key(keycode: int) -> void:
 			_camera.set_zoom_index(2)
 		KEY_F2:
 			_show_details = not _show_details
+		KEY_TAB:
+			_player_input.toggle_mode(_sim)
+		KEY_O:
+			_odometer_zero = _player.state.distance
 		KEY_R:
 			_start_race()
 		KEY_T:
@@ -217,6 +233,7 @@ func _on_middle_button(button: InputEventMouseButton) -> void:
 	if not _middle_down:
 		return
 	_middle_down = false
+	_middle_release_msec = Time.get_ticks_msec()
 	if _middle_dragging:
 		return
 	if button.ctrl_pressed:
@@ -234,6 +251,15 @@ func _on_middle_motion(motion: InputEventMouseMotion) -> void:
 			return
 		_middle_dragging = true
 	_camera.shift(motion.relative / get_viewport_rect().size)
+
+
+## Колесо мыши: один щелчок — один шаг заданной скорости или расхода.
+func _on_wheel(steps: int) -> void:
+	if _middle_down:
+		return
+	if Time.get_ticks_msec() - _middle_release_msec < int(WHEEL_GUARD_TIME * 1000.0):
+		return
+	_player_input.adjust_target(_sim, steps)
 
 
 func _store_previous() -> void:
@@ -257,15 +283,40 @@ func _build_hud_text() -> String:
 	var s = _player.state
 	var surface: SurfaceParams = _terrain.get_surface()
 	var seconds: int = int(_sim.time_seconds())
+	var hold_speed: bool = _player.target_mode == Command.TargetMode.SPEED
+
+	# Экран заезда (раздел 7.4). В скобках — заданное значение того, что держит
+	# автоматика; вторая величина меняется сама.
+	var speed_note: String = "меняется сама"
+	var rate_note: String = "меняется сам"
+	var mode_text: String = "держать расход"
+	if hold_speed:
+		speed_note = "задано %d" % roundi(_player.target_value)
+		mode_text = "держать скорость"
+	else:
+		rate_note = "задано %d" % roundi(_player.target_value)
+	var control_text: String = ""
+	if _player.is_manual_active():
+		control_text = "     РУЧНОЕ"
+		if _player.auto_throttle:
+			control_text = "     РУЛЬ ВРУЧНУЮ"
+
+	# Запас хода: если ехать дальше с этой скоростью по такому же покрытию.
+	var range_text: String = "—"
+	if s.speed() > 1.0 and s.fuel > 0.0:
+		var range_m: float = _player.sim.range_at_speed(s.speed(), s.fuel, surface)
+		if range_m < 1000000.0:
+			range_text = "%.1f" % (range_m / 1000.0)
+
 	var lines: PackedStringArray = PackedStringArray()
-	lines.append("%d км/ч     курс %.1f°     топливо %d кг     масса %d кг" % [
-		roundi(s.speed() * 3.6), s.heading_deg(), roundi(s.fuel), roundi(s.mass),
+	lines.append("режим: %s%s" % [mode_text, control_text])
+	lines.append("скорость %d км/ч  (%s)" % [roundi(s.speed() * 3.6), speed_note])
+	lines.append("расход %d кг/мин  (%s)" % [roundi(s.consumption), rate_note])
+	lines.append("топливо %d кг     запас хода %s км     масса %d кг" % [
+		roundi(s.fuel), range_text, roundi(s.mass),
 	])
-	lines.append("расход %d кг/мин     время %d:%02d     путь %.2f км" % [
-		roundi(s.consumption), int(seconds / 60.0), seconds % 60, s.distance / 1000.0,
-	])
-	lines.append("покрытие: %s     зум %d (%d м по высоте экрана)" % [
-		surface.title, _camera.zoom_index + 1, roundi(_camera.ground_height()),
+	lines.append("курс %.1f°     одометр %.2f км     время %d:%02d" % [
+		s.heading_deg(), (s.distance - _odometer_zero) / 1000.0, int(seconds / 60.0), seconds % 60,
 	])
 	if not _show_details:
 		return "\n".join(lines)
@@ -274,6 +325,9 @@ func _build_hud_text() -> String:
 	if not _burn_fuel:
 		burn_text = "ВЫКЛЮЧЕН"
 	lines.append("")
+	lines.append("покрытие: %s     зум %d (%d м по высоте экрана)" % [
+		surface.title, _camera.zoom_index + 1, roundi(_camera.ground_height()),
+	])
 	lines.append("мощность %d кВт     тяга %d Н     расход топлива %s" % [
 		roundi(s.engine_power / 1000.0), roundi(s.thrust), burn_text,
 	])
@@ -283,7 +337,7 @@ func _build_hud_text() -> String:
 	lines.append("потеря скорости на манёвре %.1f м/с за секунду" % s.scrub_decel)
 	lines.append("x %d м     y %d м     шаг %d" % [roundi(s.x), roundi(s.y), _sim.step_index])
 	lines.append("")
-	lines.append("WASD — машина     1 2 3 — зум     стрелки или средняя кнопка — сдвиг камеры")
-	lines.append("щелчок средней — вернуть камеру     Ctrl+щелчок — запомнить     Shift+щелчок — сбросить")
+	lines.append("колесо — заданное значение     Tab — скорость или расход     WASD — вручную     O — обнулить одометр")
+	lines.append("1 2 3 — зум     стрелки или средняя кнопка — сдвиг камеры     щелчок средней — вернуть камеру")
 	lines.append("[ ] — топливо ±50 кг     T — покрытие     F — расход топлива     R — заново     F2 — скрыть")
 	return "\n".join(lines)
