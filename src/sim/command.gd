@@ -6,7 +6,7 @@ extends RefCounted
 ##   MANUAL      a — руль от -1 до 1, b — газ и тормоз от -1 до 1; нули — «отпущено»
 ##   SET_TARGET  a — режим TargetMode, b — значение: км/ч или кг/мин
 ##   SET_COURSE  a — курс в градусах, active = false — «не задан»
-##   SET_POINT   a — восток, b — север, active = false — «нет точки»   (шаг 4)
+##   SET_POINT   a — восток, b — север (м), active = false — «нет точки»
 
 enum Type { MANUAL, SET_TARGET, SET_COURSE, SET_POINT }
 ## Режим удержания для SET_TARGET.

@@ -80,3 +80,14 @@ func adjust_course(sim, delta: float) -> void:
 func clear_course(sim) -> void:
 	if sim.cars[car_id].course_active:
 		sim.submit(Command.new(Command.Type.SET_COURSE, car_id, 0.0, 0.0, false))
+
+
+## Правая кнопка мыши: поставить точку (восток, север, м).
+func set_point(sim, east: float, north: float) -> void:
+	sim.submit(Command.new(Command.Type.SET_POINT, car_id, east, north, true))
+
+
+## X: убрать точку.
+func clear_point(sim) -> void:
+	if sim.cars[car_id].point_active:
+		sim.submit(Command.new(Command.Type.SET_POINT, car_id, 0.0, 0.0, false))

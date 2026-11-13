@@ -2,12 +2,12 @@ extends RefCounted
 ## Машина в заезде: модель, состояние, автоматика и последние принятые команды.
 ## Не знает, кто отдаёт команды.
 ##
-## Газ и руль разделены:
-##   газ  — W или S нажаты: игрок; иначе автоматика держит скорость или расход;
-##   руль — A или D: игрок; иначе автоматика держит основное направление,
-##          а если оно не задано, руль стоит прямо.
+## Приоритеты (раздел 3.2), отдельно для газа и для руля:
+##   газ  — W или S: игрок; иначе автоматика держит скорость или расход;
+##   руль — A или D: игрок; иначе точка; иначе основное направление;
+##          иначе руль стоит прямо.
 ## После отпускания клавиш автоматика возвращает управление через
-## manual_release_delay. Курс при перехвате не сбрасывается (раздел 3.2).
+## manual_release_delay. Точка и курс при перехвате не сбрасываются.
 
 const CarParams = preload("res://src/sim/car_params.gd")
 const CarSim = preload("res://src/sim/car_sim.gd")
@@ -35,10 +35,23 @@ var course_active: bool = false
 var course_deg: float = 0.0
 ## Рулём на последнем шаге управляла автоматика.
 var auto_steer: bool = false
+## Точка поставлена.
+var point_active: bool = false
+## Координаты точки: восток и север, м.
+var point_x: float = 0.0
+var point_y: float = 0.0
+## Счётчики событий точки: экран и запись сравнивают их с прошлым значением.
+## Пройдено точек.
+var points_passed: int = 0
+## Снято точек, ставших недостижимыми.
+var points_dropped: int = 0
+## Отклонено команд: точка вне допустимой зоны.
+var points_rejected: int = 0
 
 var _input: CarInput = CarInput.new()
 var _throttle_wait: float = 0.0
 var _steer_wait: float = 0.0
+var _last_terrain: TerrainSample = null
 
 
 func _init(p_id: int, p_params: CarParams) -> void:
@@ -61,6 +74,23 @@ func apply_command(command: Command) -> void:
 		course_active = command.active
 		if course_active:
 			course_deg = fposmod(command.a, 360.0)
+	elif command.type == Command.Type.SET_POINT:
+		_apply_point(command)
+
+
+## Новая точка заменяет прежнюю. Точка вне допустимой зоны не ставится,
+## прежняя при этом остаётся.
+func _apply_point(command: Command) -> void:
+	if not command.active:
+		point_active = false
+		return
+	if _last_terrain != null and not autopilot.point_allowed(
+			sim, state, _last_terrain, course_active, deg_to_rad(course_deg), command.a, command.b):
+		points_rejected += 1
+		return
+	point_active = true
+	point_x = command.a
+	point_y = command.b
 
 
 ## Наибольшее заданное значение для режима.
@@ -82,7 +112,18 @@ func is_manual_active() -> bool:
 	return not manual.is_zero()
 
 
+## Расстояние до точки, м.
+func point_distance() -> float:
+	var east: float = point_x - state.x
+	var north: float = point_y - state.y
+	return sqrt(east * east + north * north)
+
+
 func step(terrain: TerrainSample, dt: float) -> void:
+	_last_terrain = terrain
+	if point_active:
+		_check_point(terrain)
+
 	var throttle: float = 0.0
 	auto_throttle = false
 	if manual.throttle != 0.0:
@@ -93,6 +134,7 @@ func step(terrain: TerrainSample, dt: float) -> void:
 	else:
 		throttle = autopilot.throttle(sim, state, terrain, target_mode, target_value)
 		auto_throttle = true
+
 	var steer: float = 0.0
 	auto_steer = false
 	if manual.steer != 0.0:
@@ -100,9 +142,36 @@ func step(terrain: TerrainSample, dt: float) -> void:
 		_steer_wait = sim.params.manual_release_delay
 	elif _steer_wait > 0.0:
 		_steer_wait -= dt
+	elif point_active:
+		var bearing: float = atan2(point_x - state.x, point_y - state.y)
+		steer = autopilot.steer(sim, state, terrain, bearing)
+		auto_steer = true
 	elif course_active:
 		steer = autopilot.steer(sim, state, terrain, deg_to_rad(course_deg))
 		auto_steer = true
+
 	_input.steer = steer
 	_input.throttle = throttle
 	sim.step(state, _input, terrain, dt)
+
+
+## Точка пройдена в радиусе point_pass_radius. Вплотную к точке проверяется
+## только, не осталась ли она позади; дальше — достижима ли она ещё.
+func _check_point(terrain: TerrainSample) -> void:
+	var params: CarParams = sim.params
+	var east: float = point_x - state.x
+	var north: float = point_y - state.y
+	var distance: float = sqrt(east * east + north * north)
+	if distance <= params.point_pass_radius:
+		point_active = false
+		points_passed += 1
+		return
+	if distance < params.point_near_distance:
+		var ahead: float = east * sin(state.heading) + north * cos(state.heading)
+		if ahead <= 0.0:
+			point_active = false
+			points_dropped += 1
+		return
+	if not autopilot.point_reachable(sim, state, terrain, point_x, point_y, params.point_drop_slack):
+		point_active = false
+		points_dropped += 1

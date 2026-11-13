@@ -1,5 +1,5 @@
 extends RefCounted
-## Автопроверки шагов 0–3. Запускаются без окна: см. run_checks.bat.
+## Автопроверки шагов 0–4. Запускаются без окна: см. run_checks.bat.
 ##
 ## Ожидаемые числа взяты из таблиц дизайн-документа (разделы 3.4, 3.5, 4.2, 6, 7.1)
 ## и из независимого расчёта той же модели.
@@ -68,6 +68,10 @@ func run() -> void:
 	_test_manual_priority()
 	_section("Основное направление (3.2, 3.4)")
 	_test_course()
+	_section("Точка и зона клика (3.2, 3.4)")
+	_test_point()
+	_section("Камера при движении к точке (7.1.1)")
+	_test_point_camera()
 
 
 # --- Проверки ---------------------------------------------------------------
@@ -444,6 +448,176 @@ func _test_course() -> void:
 	ice.submit(Command.new(Command.Type.SET_COURSE, 0, 90.0, 0.0, true))
 	_steps(ice, 900)
 	_true("скользкое: за 15 с курс 90° не достигнут", ice.cars[0].state.heading_deg() < 30.0)
+
+
+## Машина на 108 км/ч с курсом 0, готовая к постановке точки.
+func _cruising_race() -> RaceSim:
+	var race: RaceSim = _new_race(250.0, 0.0)
+	race.submit(Command.new(Command.Type.SET_TARGET, 0, Command.TargetMode.SPEED, 108.0))
+	race.submit(Command.new(Command.Type.SET_COURSE, 0, 0.0, 0.0, true))
+	_steps(race, 1800)
+	return race
+
+
+## Поставить точку со смещением от машины и ехать, пока она стоит.
+## Возвращает число шагов.
+func _drive_to_point(race: RaceSim, east: float, north: float, limit: int) -> int:
+	var car = race.cars[0]
+	race.submit(Command.new(Command.Type.SET_POINT, 0, car.state.x + east, car.state.y + north, true))
+	var count: int = 0
+	while car.point_active and count < limit:
+		race.step()
+		count += 1
+	return count
+
+
+func _test_point() -> void:
+	# Раздел 3.4: смещение на 10 м вбок за 105 м пути, около 3,5 с.
+	var race: RaceSim = _cruising_race()
+	var car = race.cars[0]
+	var start_x: float = car.state.x
+	var steps: int = _drive_to_point(race, 10.0, 105.0, 3000)
+	_true("10 м вбок на 105 м: точка пройдена", car.points_passed == 1 and car.points_dropped == 0)
+	_near("10 м вбок на 105 м: время, с", steps / 60.0, 3.4, 0.3)
+	_true("машина сместилась вправо", car.state.x - start_x > 5.0)
+	_true("после точки машина на автоматике", car.auto_steer and not car.point_active)
+	_steps(race, 900)
+	_near("после точки машина вернулась на курс, градусы", wrapf(car.state.heading_deg(), -180.0, 180.0), 0.0, 0.01)
+	_true("смещение осталось: машина держит курс, а не линию", car.state.x - start_x > 10.0)
+	_near("манёвр к точке не стоил скорости, км/ч", car.state.speed() * 3.6, 108.0, 0.3)
+
+	# Зона клика при заданном курсе.
+	var terrain: TerrainSample = _terrain(_hard, 0.0)
+	var pilot = car.autopilot
+	var x: float = car.state.x
+	var y: float = car.state.y
+	var radius: float = pilot.auto_turn_radius(car.sim, car.state, terrain)
+	_near("радиус поворота автоматики, м", radius, 270.0, 5.0)
+	_true("зона: прямо вперёд 200 м — можно", pilot.point_allowed(car.sim, car.state, terrain, true, 0.0, x, y + 200.0))
+	_true("зона: 18 м вбок на 105 м — можно", pilot.point_allowed(car.sim, car.state, terrain, true, 0.0, x + 18.0, y + 105.0))
+	_true("зона: 30 м вбок на 105 м — нельзя", not pilot.point_allowed(car.sim, car.state, terrain, true, 0.0, x + 30.0, y + 105.0))
+	_true("зона: дальше 400 м — нельзя", not pilot.point_allowed(car.sim, car.state, terrain, true, 0.0, x, y + 420.0))
+	_true("зона: 100 м строго сбоку — нельзя", not pilot.point_allowed(car.sim, car.state, terrain, true, 0.0, x + 100.0, y))
+	_true("зона: позади — нельзя при заданном курсе", not pilot.point_allowed(car.sim, car.state, terrain, true, 0.0, x, y - 300.0))
+	_true("зона: позади — можно, если курс не задан", pilot.point_allowed(car.sim, car.state, terrain, false, 0.0, x, y - 300.0))
+	_true("зона под 50°: при курсе на 400 м нельзя, без курса на 600 м можно", pilot.point_allowed(car.sim, car.state, terrain, true, 0.0,
+		x + 400.0 * sin(deg_to_rad(50.0)), y + 400.0 * cos(deg_to_rad(50.0))) == false
+		and pilot.point_allowed(car.sim, car.state, terrain, false, 0.0,
+		x + 600.0 * sin(deg_to_rad(50.0)), y + 600.0 * cos(deg_to_rad(50.0))))
+	_near("ближняя граница зоны под 30°, м", pilot.zone_inner_distance(radius, deg_to_rad(30.0)), radius, 0.01)
+
+	# Команда вне зоны отклоняется, прежняя точка остаётся.
+	race.submit(Command.new(Command.Type.SET_POINT, 0, x, y + 200.0, true))
+	race.submit(Command.new(Command.Type.SET_POINT, 0, x + 100.0, y, true))
+	_true("точка вне зоны не ставится, прежняя остаётся",
+		car.points_rejected == 1 and car.point_active and car.point_y == y + 200.0)
+	# Новая точка заменяет прежнюю.
+	race.submit(Command.new(Command.Type.SET_POINT, 0, x + 10.0, y + 250.0, true))
+	_true("новая точка заменяет прежнюю", car.point_active and car.point_x == x + 10.0)
+	# X снимает точку.
+	race.submit(Command.new(Command.Type.SET_POINT, 0, 0.0, 0.0, false))
+	_true("точка снята командой", not car.point_active and car.points_dropped == 0)
+
+	# Перехват: точка остаётся; уведённая в сторону машина теряет её как недостижимую.
+	var lost: RaceSim = _cruising_race()
+	var lost_car = lost.cars[0]
+	lost.submit(Command.new(Command.Type.SET_POINT, 0, lost_car.state.x + 15.0, lost_car.state.y + 250.0, true))
+	lost.submit(Command.new(Command.Type.MANUAL, 0, -1.0, 0.0))
+	_steps(lost, 30)
+	_true("перехват рулём: точка не сброшена", lost_car.point_active and not lost_car.auto_steer)
+	_steps(lost, 240)
+	_true("уход от точки на WASD: точка снята как недостижимая", not lost_car.point_active and lost_car.points_dropped == 1)
+
+	# Курс не задан: машина идёт к точке позади по дуге и дальше едет прямо.
+	var roam: RaceSim = _new_race(250.0, 0.0)
+	var free_car = roam.cars[0]
+	roam.submit(Command.new(Command.Type.SET_TARGET, 0, Command.TargetMode.SPEED, 108.0))
+	_steps(roam, 1800)
+	var turn_steps: int = _drive_to_point(roam, 0.0, -300.0, 6000)
+	_true("без курса: точка позади пройдена", free_car.points_passed == 1)
+	_near("без курса: время разворота к точке, с", turn_steps / 60.0, 51.0, 3.0)
+	var heading_after: float = free_car.state.heading_deg()
+	_steps(roam, 300)
+	_near("без курса: после точки машина едет прямо, градусы", free_car.state.heading_deg(), heading_after, 1.0)
+
+	# На малой скорости зона ближе.
+	var slow: RaceSim = _new_race(250.0, 0.0)
+	slow.submit(Command.new(Command.Type.SET_TARGET, 0, Command.TargetMode.SPEED, 20.0))
+	_steps(slow, 600)
+	_drive_to_point(slow, 10.0, 20.0, 1200)
+	_true("20 км/ч: точка в 22 м под углом пройдена", slow.cars[0].points_passed == 1)
+
+
+func _test_point_camera() -> void:
+	var camera_params: CameraParams = load("res://data/camera_default.tres") as CameraParams
+	if camera_params == null:
+		_report(false, "Файл параметров камеры не загрузился")
+		return
+	var camera: CameraRig = CameraRig.new(camera_params, false)
+	# Таблица режимов: Ctrl — горизонталь наоборот, Alt — вертикаль наоборот.
+	var table: Array = [[1, 2, 3, 4], [2, 1, 4, 3], [3, 4, 1, 2], [4, 3, 2, 1]]
+	var table_ok: bool = true
+	for base in 4:
+		camera.point_mode = base + 1
+		var row: Array = [camera.resolve_point_mode(false, false), camera.resolve_point_mode(true, false),
+			camera.resolve_point_mode(false, true), camera.resolve_point_mode(true, true)]
+		if row != table[base]:
+			table_ok = false
+	_true("таблица режимов с Ctrl и Alt", table_ok)
+	camera.point_mode = 4
+	camera.cycle_point_mode()
+	_true("V: после режима 4 идёт режим 1", camera.point_mode == 1)
+
+	# Пример из документа: экран 1920×1080 не важен, всё в долях экрана.
+	var start: Vector2 = Vector2(0.5, 0.75)
+	var cursor: Vector2 = Vector2(0.4, 0.3)
+	var expected: Array = [Vector2(0.5, 0.75), Vector2(0.4, 0.75), Vector2(0.5, 0.3), Vector2(0.4, 0.3)]
+	for mode in 4:
+		var rig: CameraRig = CameraRig.new(camera_params, false)
+		rig.begin_point(cursor, mode + 1, 200.0)
+		for i in 200:
+			rig.track_point(200.0 - i, 1.0 / 60.0)
+			rig.update(1.0 / 60.0)
+		rig.track_point(0.0, 1.0)
+		_true("режим %d: машина пришла в нужное место экрана" % (mode + 1), rig.car_frac.is_equal_approx(expected[mode]))
+	# Половина пути — половина переноса.
+	var half: CameraRig = CameraRig.new(camera_params, false)
+	half.begin_point(cursor, 4, 200.0)
+	half.track_point(100.0, 10.0)
+	_true("полпути: машина на полпути по экрану", half.car_frac.is_equal_approx(start.lerp(cursor, 0.5)))
+	# Машина удаляется от точки: возвращается на экране к старту.
+	half.track_point(260.0, 10.0)
+	_true("удаление от точки: машина вернулась к старту", half.car_frac.is_equal_approx(start))
+	# Клик у края: цель сдвигается внутрь до 8 %.
+	var edge: CameraRig = CameraRig.new(camera_params, false)
+	edge.begin_point(Vector2(0.99, 0.01), 4, 100.0)
+	edge.track_point(0.0, 10.0)
+	_true("клик у края: машина не ближе 8 % к краю", edge.car_frac.is_equal_approx(Vector2(0.92, 0.08)))
+	# После точки: остаётся на новом месте; с возвратом — уходит в стандартное.
+	edge.end_point(true)
+	edge.update(1.0)
+	_true("после точки машина остаётся на новом месте", edge.car_frac.is_equal_approx(Vector2(0.92, 0.08)))
+	edge.auto_return = true
+	edge.begin_point(Vector2(0.3, 0.3), 2, 100.0)
+	edge.track_point(0.0, 10.0)
+	edge.end_point(true)
+	edge.update(0.75)
+	_true("возврат: через 0,75 с камера ещё в пути", not edge.car_frac.is_equal_approx(start))
+	edge.update(0.8)
+	_true("возврат: через 1,5 с машина в стандартном положении", edge.car_frac.is_equal_approx(start))
+	# Ручной сдвиг отменяет автоматическое движение до следующей точки.
+	var manual: CameraRig = CameraRig.new(camera_params, false)
+	manual.begin_point(cursor, 4, 200.0)
+	manual.track_point(100.0, 10.0)
+	manual.shift(Vector2(0.1, 0.0))
+	var after_shift: Vector2 = manual.car_frac
+	manual.track_point(50.0, 10.0)
+	_true("ручной сдвиг отменяет движение камеры к точке", manual.car_frac == after_shift and not manual.is_tracking_point())
+	# Режим 1 ничего не меняет.
+	var follow: CameraRig = CameraRig.new(camera_params, false)
+	follow.begin_point(cursor, 1, 200.0)
+	follow.track_point(0.0, 10.0)
+	_true("режим 1: положение машины на экране не меняется", follow.car_frac == start and not follow.is_tracking_point())
 
 
 func _new_race(fuel: float, speed: float) -> RaceSim:

@@ -18,3 +18,15 @@ extends Resource
 @export var arrow_shift_rate: float = 0.6
 ## Сколько секунд показывать метку стандартного положения.
 @export var marker_time: float = 1.0
+
+@export_group("Камера при движении к точке")
+## Стартовый основной режим: 1 следование, 2 по горизонтали, 3 по вертикали, 4 полный.
+@export var point_mode_start: int = 1
+## Сглаживание движения камеры к точке, с: за три таких времени рывок гаснет.
+@export var point_smooth_time: float = 0.1
+## Время возврата в стандартное положение после точки (клавиша H), с.
+@export var auto_return_time: float = 1.5
+## Точка ставится при отпускании правой кнопки (true) или при нажатии (false).
+@export var point_on_release: bool = true
+## Дальность, до которой рисуется зона клика, когда курс не задан, м.
+@export var zone_draw_range: float = 1500.0

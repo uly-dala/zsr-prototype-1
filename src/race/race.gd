@@ -3,7 +3,8 @@ extends Node2D
 ##
 ## Шаги 1–3 дизайн-документа: одна машина на пустой плоскости, WASD,
 ## силы и масса, камера, удержание скорости и расхода, экран заезда,
-## основное направление и указатель курса.
+## основное направление и указатель курса, точка, зона клика и камера
+## при движении к точке.
 ##
 ## Узел только связывает части между собой:
 ##   ввод игрока -> команды -> RaceSim (фиксированный шаг 60 раз в секунду)
@@ -22,6 +23,8 @@ const GroundGrid = preload("res://src/view/ground_grid.gd")
 const CarView = preload("res://src/view/car_view.gd")
 const TrailView = preload("res://src/view/trail_view.gd")
 const CourseView = preload("res://src/view/course_view.gd")
+const PointView = preload("res://src/view/point_view.gd")
+const Beeper = preload("res://src/ui/beeper.gd")
 const Hud = preload("res://src/ui/hud.gd")
 const Command = preload("res://src/sim/command.gd")
 
@@ -39,6 +42,7 @@ const DEBUG_FUEL_STEP: float = 50.0
 ## Вращение колеса не учитывается, пока колесо нажато и столько секунд после
 ## отпускания: иначе возврат камеры случайно менял бы заданную скорость (7.1).
 const WHEEL_GUARD_TIME: float = 0.15
+const POINT_MODE_NAMES: Array = ["следование", "по горизонтали", "по вертикали", "полный"]
 
 ## Топливо на старте, кг. 250 кг — полбака, «средняя масса» из документа.
 @export_range(0.0, 500.0, 50.0) var start_fuel: float = 250.0
@@ -61,6 +65,8 @@ var _world: Node2D
 var _grid: GroundGrid
 var _trail: TrailView
 var _course_view: CourseView
+var _point_view: PointView
+var _beeper: Beeper
 var _car_view: CarView
 var _hud: Hud
 
@@ -76,6 +82,10 @@ var _middle_press_pos: Vector2 = Vector2.ZERO
 var _middle_release_msec: int = -100000
 ## Показание пройденного пути, от которого считает одометр, м.
 var _odometer_zero: float = 0.0
+var _right_down: bool = false
+var _seen_passed: int = 0
+var _seen_dropped: int = 0
+var _last_point_pos: Vector2 = Vector2.ZERO
 
 
 func _ready() -> void:
@@ -96,6 +106,9 @@ func _ready() -> void:
 	_trail = TrailView.new()
 	_trail.name = "Trail"
 	_world.add_child(_trail)
+	_point_view = PointView.new()
+	_point_view.name = "Point"
+	_world.add_child(_point_view)
 	_course_view = CourseView.new()
 	_course_view.name = "CourseLine"
 	_world.add_child(_course_view)
@@ -106,6 +119,9 @@ func _ready() -> void:
 	var layer: CanvasLayer = CanvasLayer.new()
 	layer.name = "UI"
 	add_child(layer)
+	_beeper = Beeper.new()
+	_beeper.name = "Beeper"
+	add_child(_beeper)
 	_hud = Hud.new()
 	_hud.name = "Hud"
 	layer.add_child(_hud)
@@ -125,6 +141,9 @@ func _start_race() -> void:
 	_player.sim.burn_fuel = _burn_fuel
 	_player_input = PlayerInput.new(_player.id)
 	_odometer_zero = 0.0
+	_seen_passed = 0
+	_seen_dropped = 0
+	_camera.end_point(false)
 	_store_previous()
 	_trail.clear()
 	_trail.add_point(Vector2.ZERO)
@@ -173,6 +192,7 @@ func _process(delta: float) -> void:
 		_car_view.queue_redraw()
 
 	var viewport_size: Vector2 = get_viewport_rect().size
+	_update_point(car_pos, viewport_size, delta)
 	_world.transform = _camera.world_transform(car_pos, viewport_size)
 	_grid.visible_rect = _camera.visible_world_rect(car_pos, viewport_size)
 	_grid.queue_redraw()
@@ -200,6 +220,8 @@ func _unhandled_input(event: InputEvent) -> void:
 		var button: InputEventMouseButton = event as InputEventMouseButton
 		if button.button_index == MOUSE_BUTTON_MIDDLE:
 			_on_middle_button(button)
+		elif button.button_index == MOUSE_BUTTON_RIGHT:
+			_on_right_button(button)
 		elif button.pressed and button.button_index == MOUSE_BUTTON_LEFT:
 			_on_left_click(button.position)
 		elif button.pressed and button.button_index == MOUSE_BUTTON_WHEEL_UP:
@@ -223,6 +245,14 @@ func _on_key(keycode: int) -> void:
 			_show_details = not _show_details
 		KEY_TAB:
 			_player_input.toggle_mode(_sim)
+		KEY_X:
+			if _player.point_active:
+				_player_input.clear_point(_sim)
+				_camera.end_point(false)
+		KEY_V:
+			_camera.cycle_point_mode()
+		KEY_H:
+			_camera.toggle_auto_return()
 		KEY_C:
 			_player_input.clear_course(_sim)
 		KEY_O:
@@ -281,6 +311,63 @@ func _on_left_click(screen_pos: Vector2) -> void:
 	if east * east + north * north < 4.0:
 		return
 	_player_input.set_course(_sim, rad_to_deg(atan2(east, north)))
+
+
+## Правая кнопка мыши: пока зажата, видна зона клика; точка ставится
+## при отпускании (или при нажатии, если так задано в параметрах камеры).
+func _on_right_button(button: InputEventMouseButton) -> void:
+	_right_down = button.pressed
+	if button.pressed != _camera.params.point_on_release:
+		_place_point(button)
+
+
+func _place_point(button: InputEventMouseButton) -> void:
+	var ground: Vector2 = _world.transform.affine_inverse() * button.position
+	var rejected_before: int = _player.points_rejected
+	_player_input.set_point(_sim, ground.x, -ground.y)
+	if _player.points_rejected != rejected_before:
+		# Курсор вне зоны: точка не ставится, звучит сигнал.
+		_beeper.beep()
+		return
+	var mode: int = _camera.resolve_point_mode(button.ctrl_pressed, button.alt_pressed)
+	_camera.begin_point(button.position / get_viewport_rect().size, mode, _player.point_distance())
+
+
+## Точка, зона клика и камера при движении к точке. Вызывается каждый кадр.
+func _update_point(car_pos: Vector2, viewport_size: Vector2, delta: float) -> void:
+	var params: CarParams = _car_params
+	if _player.points_passed != _seen_passed:
+		_seen_passed = _player.points_passed
+		_camera.end_point(true)
+	if _player.points_dropped != _seen_dropped:
+		# Точка стала недостижимой: сигнал и вспышка маркера.
+		_seen_dropped = _player.points_dropped
+		_camera.end_point(false)
+		_point_view.flash(_last_point_pos)
+		_beeper.beep()
+	if _player.point_active:
+		_last_point_pos = Vector2(_player.point_x, -_player.point_y)
+		_camera.track_point(car_pos.distance_to(_last_point_pos), delta)
+	_point_view.set_point(_player.point_active, _last_point_pos, params.point_pass_radius)
+
+	if not _right_down:
+		_point_view.hide_zone()
+		return
+	var state = _player.state
+	var terrain = _terrain.sample(state.x, state.y)
+	var autopilot = _player.autopilot
+	var radius: float = autopilot.auto_turn_radius(_player.sim, state, terrain) * params.point_zone_margin
+	var center: float = state.heading
+	var half_angle: float = PI
+	var max_range: float = _camera.params.zone_draw_range
+	if _player.course_active:
+		center = deg_to_rad(_player.course_deg)
+		half_angle = deg_to_rad(params.point_sector_deg)
+		max_range = params.point_max_range
+	var cursor: Vector2 = _camera.world_transform(car_pos, viewport_size).affine_inverse() * get_viewport().get_mouse_position()
+	var cursor_ok: bool = autopilot.point_allowed(_player.sim, state, terrain,
+		_player.course_active, deg_to_rad(_player.course_deg), cursor.x, -cursor.y)
+	_point_view.show_zone(car_pos, state.heading, radius, center, half_angle, max_range, cursor_ok)
 
 
 ## Колесо мыши: один щелчок — один шаг заданной скорости или расхода.
@@ -353,6 +440,15 @@ func _build_hud_text() -> String:
 	lines.append("курс %.1f°  (%s)     одометр %.2f км     время %d:%02d" % [
 		s.heading_deg(), course_note, (s.distance - _odometer_zero) / 1000.0, int(seconds / 60.0), seconds % 60,
 	])
+	var point_text: String = "нет"
+	if _player.point_active:
+		point_text = "поставлена"
+	var return_text: String = "выключен"
+	if _camera.auto_return:
+		return_text = "включён"
+	lines.append("точка: %s     камера для точки: режим %d (%s)     возврат камеры: %s" % [
+		point_text, _camera.point_mode, POINT_MODE_NAMES[_camera.point_mode - 1], return_text,
+	])
 	if not _show_details:
 		return "\n".join(lines)
 
@@ -374,6 +470,7 @@ func _build_hud_text() -> String:
 	lines.append("")
 	lines.append("колесо — заданное значение     Tab — скорость или расход     WASD — вручную     O — обнулить одометр")
 	lines.append("левый клик — курс     Q E — курс ±1°     C — сбросить курс")
+	lines.append("правая кнопка — точка (с Ctrl, Alt — перенос на экране)     X — убрать точку     V — режим камеры     H — возврат камеры")
 	lines.append("1 2 3 — зум     стрелки или средняя кнопка — сдвиг камеры     щелчок средней — вернуть камеру")
 	lines.append("[ ] — топливо ±50 кг     T — покрытие     F — расход топлива     R — заново     F2 — скрыть")
 	return "\n".join(lines)
