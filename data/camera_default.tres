@@ -1,0 +1,14 @@
+[gd_resource type="Resource" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://src/view/camera_params.gd" id="1_script"]
+
+[resource]
+script = ExtResource("1_script")
+zoom_heights = PackedFloat32Array(170, 330, 500)
+start_zoom_index = 1
+default_car_frac = Vector2(0.5, 0.75)
+edge_margin = 0.08
+quick_return_time = 0.3
+click_move_threshold = 5.0
+arrow_shift_rate = 0.6
+marker_time = 1.0

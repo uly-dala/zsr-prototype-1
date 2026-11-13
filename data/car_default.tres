@@ -1,0 +1,21 @@
+[gd_resource type="Resource" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://src/sim/car_params.gd" id="1_script"]
+
+[resource]
+script = ExtResource("1_script")
+dry_mass = 1000.0
+fuel_capacity = 500.0
+max_power = 150000.0
+max_thrust = 8000.0
+fuel_per_joule = 5e-05
+brake_decel = 10.0
+lateral_accel = 9.0
+grip_mass_exponent = 0.45
+reference_mass = 1000.0
+min_geometric_radius = 6.0
+steer_rate = 3.0
+drag_coefficient = 0.6
+gravity = 9.81
+autopilot_lateral_share = 0.4
+manual_scrub_decel = 4.0

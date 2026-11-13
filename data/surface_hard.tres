@@ -1,0 +1,11 @@
+[gd_resource type="Resource" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://src/sim/surface_params.gd" id="1_script"]
+
+[resource]
+script = ExtResource("1_script")
+id = "hard"
+title = "Твёрдый грунт"
+rolling_coefficient = 0.03
+grip = 1.0
+color = Color(0.33, 0.27, 0.21, 1)

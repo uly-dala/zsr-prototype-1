@@ -1,3 +1,7 @@
 # Godot 4+ specific ignores
 .godot/
 /android/
+
+# Записи заездов и журнал автопроверок
+logs/*
+!logs/.gdignore
