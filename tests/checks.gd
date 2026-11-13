@@ -1,5 +1,5 @@
 extends RefCounted
-## Автопроверки шагов 0–2. Запускаются без окна: см. run_checks.bat.
+## Автопроверки шагов 0–3. Запускаются без окна: см. run_checks.bat.
 ##
 ## Ожидаемые числа взяты из таблиц дизайн-документа (разделы 3.4, 3.5, 4.2, 6, 7.1)
 ## и из независимого расчёта той же модели.
@@ -66,6 +66,8 @@ func run() -> void:
 	_test_hold()
 	_section("Приоритет WASD над автоматикой (3.2)")
 	_test_manual_priority()
+	_section("Основное направление (3.2, 3.4)")
+	_test_course()
 
 
 # --- Проверки ---------------------------------------------------------------
@@ -372,6 +374,76 @@ func _test_manual_priority() -> void:
 	race.submit(Command.new(Command.Type.MANUAL, 0, 0.0, 1.0))
 	_steps(race, 300)
 	_true("W: разгон выше заданной скорости", car.state.speed() * 3.6 > 125.0)
+
+
+func _test_course() -> void:
+	var race: RaceSim = _new_race(250.0, 0.0)
+	var car = race.cars[0]
+	race.submit(Command.new(Command.Type.SET_TARGET, 0, Command.TargetMode.SPEED, 110.0))
+	_steps(race, 1800)
+	_near("без курса машина едет прямо, градусы", car.state.heading_deg(), 0.0, 0.0001)
+	# Поворот на курс 90°.
+	race.submit(Command.new(Command.Type.SET_COURSE, 0, 90.0, 0.0, true))
+	var max_ratio: float = 0.0
+	var max_scrub: float = 0.0
+	var max_heading: float = 0.0
+	var reached_step: int = -1
+	for i in 1500:
+		race.step()
+		max_ratio = maxf(max_ratio, car.state.lateral_ratio)
+		max_scrub = maxf(max_scrub, car.state.scrub_decel)
+		max_heading = maxf(max_heading, car.state.heading_deg())
+		if reached_step < 0 and absf(car.state.heading_deg() - 90.0) < 0.2:
+			reached_step = i
+	_near("поворот на 90°: курс достигнут, градусы", car.state.heading_deg(), 90.0, 0.01)
+	_near("поворот на 90°: время, с", reached_step / 60.0, 15.7, 1.0)
+	_true("поворот на 90°: без перелёта (наибольший курс %.3f)" % max_heading, max_heading <= 90.001)
+	_near("автоматика берёт 40 % боковой силы", max_ratio, 0.4, 0.001)
+	_true("поворот автоматики не стоит скорости", max_scrub < 0.001)
+	_near("скорость после поворота, км/ч", car.state.speed() * 3.6, 110.0, 0.3)
+	_true("рулём управляет автоматика", car.auto_steer)
+	# Кратчайшая сторона через север: с 90° на 350° — влево на 100°.
+	race.submit(Command.new(Command.Type.SET_COURSE, 0, 350.0, 0.0, true))
+	_steps(race, 60)
+	_true("с 90° на 350°: поворот влево", car.state.heading_deg() < 90.0 and car.state.yaw_rate < 0.0)
+	_steps(race, 1500)
+	_near("с 90° на 350°: курс достигнут, градусы", car.state.heading_deg(), 350.0, 0.01)
+	# Перехват рулём: курс не сбрасывается, после отпускания машина возвращается.
+	race.submit(Command.new(Command.Type.MANUAL, 0, 1.0, 0.0))
+	_steps(race, 60)
+	_true("D: рулит игрок, курс не сброшен", not car.auto_steer and car.course_active)
+	var turned: float = wrapf(car.state.heading_deg() - 350.0, -180.0, 180.0)
+	_true("D: машина ушла вправо на %.1f°" % turned, turned > 5.0)
+	race.submit(Command.new(Command.Type.MANUAL, 0, 0.0, 0.0))
+	_steps(race, 12)
+	_true("после отпускания: 0,2 с руль ещё не у автоматики", not car.auto_steer)
+	_steps(race, 600)
+	_near("после отпускания: курс возвращён, градусы", car.state.heading_deg(), 350.0, 0.01)
+	# Сброс курса.
+	race.submit(Command.new(Command.Type.SET_COURSE, 0, 0.0, 0.0, false))
+	race.submit(Command.new(Command.Type.MANUAL, 0, 1.0, 0.0))
+	_steps(race, 30)
+	race.submit(Command.new(Command.Type.MANUAL, 0, 0.0, 0.0))
+	_steps(race, 300)
+	_true("C: курс сброшен, машина не возвращается", not car.course_active and not car.auto_steer
+		and absf(wrapf(car.state.heading_deg() - 350.0, -180.0, 180.0)) > 1.0)
+	_near("C: машина едет прямо, рад/с", car.state.yaw_rate, 0.0, 0.0001)
+	# Курс задаётся и на месте, а поворот начинается с движением.
+	var parked: RaceSim = _new_race(250.0, 0.0)
+	parked.submit(Command.new(Command.Type.SET_COURSE, 0, 180.0, 0.0, true))
+	_steps(parked, 120)
+	_near("на месте машина не разворачивается, градусы", parked.cars[0].state.heading_deg(), 0.0, 0.0001)
+	parked.submit(Command.new(Command.Type.SET_TARGET, 0, Command.TargetMode.SPEED, 20.0))
+	_steps(parked, 1800)
+	_near("20 км/ч: разворот на 180°, градусы", parked.cars[0].state.heading_deg(), 180.0, 0.01)
+	# На скользком нос поворачивает намного медленнее.
+	var ice: RaceSim = RaceSim.new(FlatTerrain.new(_slick))
+	ice.add_car(_params, 250.0, 0.0, 0.0, 0.0)
+	ice.submit(Command.new(Command.Type.SET_TARGET, 0, Command.TargetMode.SPEED, 110.0))
+	_steps(ice, 3600)
+	ice.submit(Command.new(Command.Type.SET_COURSE, 0, 90.0, 0.0, true))
+	_steps(ice, 900)
+	_true("скользкое: за 15 с курс 90° не достигнут", ice.cars[0].state.heading_deg() < 30.0)
 
 
 func _new_race(fuel: float, speed: float) -> RaceSim:

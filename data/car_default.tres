@@ -27,3 +27,4 @@ target_consumption_max = 150.0
 autopilot_speed_gain = 0.8
 autopilot_max_accel = 3.0
 autopilot_max_brake = 3.0
+autopilot_course_gain = 1.5

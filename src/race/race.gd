@@ -1,8 +1,9 @@
 extends Node2D
 ## Сцена заезда.
 ##
-## Шаги 1 и 2 дизайн-документа: одна машина на пустой плоскости, WASD,
-## силы и масса, камера, удержание скорости и расхода, экран заезда.
+## Шаги 1–3 дизайн-документа: одна машина на пустой плоскости, WASD,
+## силы и масса, камера, удержание скорости и расхода, экран заезда,
+## основное направление и указатель курса.
 ##
 ## Узел только связывает части между собой:
 ##   ввод игрока -> команды -> RaceSim (фиксированный шаг 60 раз в секунду)
@@ -20,6 +21,7 @@ const CameraRig = preload("res://src/view/camera_rig.gd")
 const GroundGrid = preload("res://src/view/ground_grid.gd")
 const CarView = preload("res://src/view/car_view.gd")
 const TrailView = preload("res://src/view/trail_view.gd")
+const CourseView = preload("res://src/view/course_view.gd")
 const Hud = preload("res://src/ui/hud.gd")
 const Command = preload("res://src/sim/command.gd")
 
@@ -58,6 +60,7 @@ var _camera: CameraRig
 var _world: Node2D
 var _grid: GroundGrid
 var _trail: TrailView
+var _course_view: CourseView
 var _car_view: CarView
 var _hud: Hud
 
@@ -93,6 +96,9 @@ func _ready() -> void:
 	_trail = TrailView.new()
 	_trail.name = "Trail"
 	_world.add_child(_trail)
+	_course_view = CourseView.new()
+	_course_view.name = "CourseLine"
+	_world.add_child(_course_view)
 	_car_view = CarView.new()
 	_car_view.name = "PlayerCar"
 	_world.add_child(_car_view)
@@ -171,6 +177,11 @@ func _process(delta: float) -> void:
 	_grid.visible_rect = _camera.visible_world_rect(car_pos, viewport_size)
 	_grid.queue_redraw()
 
+	_course_view.set_course(_player.course_active, car_pos, deg_to_rad(_player.course_deg))
+	var course_text: String = "%.1f°" % s.heading_deg()
+	if _player.course_active:
+		course_text += "\nзадан %d°" % roundi(_player.course_deg)
+	_hud.set_course_text(course_text, _camera.car_frac)
 	_hud.set_marker(_camera.marker_time_left > 0.0, _camera.standard_frac)
 	_hud.set_lines(_build_hud_text())
 
@@ -178,12 +189,19 @@ func _process(delta: float) -> void:
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey:
 		var key: InputEventKey = event as InputEventKey
-		if key.pressed and not key.echo:
+		if key.pressed and key.physical_keycode == KEY_Q:
+			# Q и E повторяются при удержании: так удобнее набирать курс числом.
+			_player_input.adjust_course(_sim, -1.0)
+		elif key.pressed and key.physical_keycode == KEY_E:
+			_player_input.adjust_course(_sim, 1.0)
+		elif key.pressed and not key.echo:
 			_on_key(key.physical_keycode)
 	elif event is InputEventMouseButton:
 		var button: InputEventMouseButton = event as InputEventMouseButton
 		if button.button_index == MOUSE_BUTTON_MIDDLE:
 			_on_middle_button(button)
+		elif button.pressed and button.button_index == MOUSE_BUTTON_LEFT:
+			_on_left_click(button.position)
 		elif button.pressed and button.button_index == MOUSE_BUTTON_WHEEL_UP:
 			_on_wheel(1)
 		elif button.pressed and button.button_index == MOUSE_BUTTON_WHEEL_DOWN:
@@ -205,6 +223,8 @@ func _on_key(keycode: int) -> void:
 			_show_details = not _show_details
 		KEY_TAB:
 			_player_input.toggle_mode(_sim)
+		KEY_C:
+			_player_input.clear_course(_sim)
 		KEY_O:
 			_odometer_zero = _player.state.distance
 		KEY_R:
@@ -251,6 +271,16 @@ func _on_middle_motion(motion: InputEventMouseMotion) -> void:
 			return
 		_middle_dragging = true
 	_camera.shift(motion.relative / get_viewport_rect().size)
+
+
+## Левый клик по земле: основное направление — курс от машины к месту клика.
+func _on_left_click(screen_pos: Vector2) -> void:
+	var ground: Vector2 = _world.transform.affine_inverse() * screen_pos
+	var east: float = ground.x - _player.state.x
+	var north: float = -ground.y - _player.state.y
+	if east * east + north * north < 4.0:
+		return
+	_player_input.set_course(_sim, rad_to_deg(atan2(east, north)))
 
 
 ## Колесо мыши: один щелчок — один шаг заданной скорости или расхода.
@@ -300,6 +330,8 @@ func _build_hud_text() -> String:
 		control_text = "     РУЧНОЕ"
 		if _player.auto_throttle:
 			control_text = "     РУЛЬ ВРУЧНУЮ"
+		elif _player.auto_steer:
+			control_text = "     ГАЗ ВРУЧНУЮ"
 
 	# Запас хода: если ехать дальше с этой скоростью по такому же покрытию.
 	var range_text: String = "—"
@@ -315,8 +347,11 @@ func _build_hud_text() -> String:
 	lines.append("топливо %d кг     запас хода %s км     масса %d кг" % [
 		roundi(s.fuel), range_text, roundi(s.mass),
 	])
-	lines.append("курс %.1f°     одометр %.2f км     время %d:%02d" % [
-		s.heading_deg(), (s.distance - _odometer_zero) / 1000.0, int(seconds / 60.0), seconds % 60,
+	var course_note: String = "не задан"
+	if _player.course_active:
+		course_note = "задан %d°" % roundi(_player.course_deg)
+	lines.append("курс %.1f°  (%s)     одометр %.2f км     время %d:%02d" % [
+		s.heading_deg(), course_note, (s.distance - _odometer_zero) / 1000.0, int(seconds / 60.0), seconds % 60,
 	])
 	if not _show_details:
 		return "\n".join(lines)
@@ -338,6 +373,7 @@ func _build_hud_text() -> String:
 	lines.append("x %d м     y %d м     шаг %d" % [roundi(s.x), roundi(s.y), _sim.step_index])
 	lines.append("")
 	lines.append("колесо — заданное значение     Tab — скорость или расход     WASD — вручную     O — обнулить одометр")
+	lines.append("левый клик — курс     Q E — курс ±1°     C — сбросить курс")
 	lines.append("1 2 3 — зум     стрелки или средняя кнопка — сдвиг камеры     щелчок средней — вернуть камеру")
 	lines.append("[ ] — топливо ±50 кг     T — покрытие     F — расход топлива     R — заново     F2 — скрыть")
 	return "\n".join(lines)

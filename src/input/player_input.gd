@@ -57,3 +57,26 @@ func toggle_mode(sim) -> void:
 	var step_size: float = car.target_step(mode)
 	var value: float = clampf(round(current / step_size) * step_size, 0.0, car.max_target(mode))
 	sim.submit(Command.new(Command.Type.SET_TARGET, car_id, mode, value))
+
+
+## Левый клик по земле: задать основное направление. Курс округляется до градуса,
+## чтобы число на экране было тем, что игрок может сверить с картой.
+func set_course(sim, degrees: float) -> void:
+	var value: float = fposmod(round(degrees), 360.0)
+	sim.submit(Command.new(Command.Type.SET_COURSE, car_id, value, 0.0, true))
+
+
+## Q и E: повернуть заданный курс на delta градусов. Если курс не задан,
+## отсчёт идёт от текущего направления машины.
+func adjust_course(sim, delta: float) -> void:
+	var car = sim.cars[car_id]
+	var base: float = car.course_deg
+	if not car.course_active:
+		base = round(car.state.heading_deg())
+	set_course(sim, base + delta)
+
+
+## C: сбросить основное направление.
+func clear_course(sim) -> void:
+	if sim.cars[car_id].course_active:
+		sim.submit(Command.new(Command.Type.SET_COURSE, car_id, 0.0, 0.0, false))

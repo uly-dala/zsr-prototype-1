@@ -59,3 +59,7 @@ extends Resource
 @export var autopilot_max_accel: float = 3.0
 ## Наибольшее торможение автоматики, м/с² (допущение).
 @export var autopilot_max_brake: float = 3.0
+
+@export_group("Удержание курса")
+## Насколько резко автоматика доворачивает нос: рад/с на 1 рад ошибки курса.
+@export var autopilot_course_gain: float = 1.5

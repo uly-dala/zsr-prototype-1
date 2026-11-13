@@ -3,6 +3,7 @@ extends Control
 ## Настоящий экран заезда (раздел 7.4) появится на шаге 2.
 
 var _label: Label
+var _course_label: Label
 var _marker_visible: bool = false
 var _marker_frac: Vector2 = Vector2(0.5, 0.75)
 var _marker_color: Color = Color(1.0, 0.9, 0.5, 0.9)
@@ -22,11 +23,29 @@ func _ready() -> void:
 	_label.add_theme_constant_override("shadow_offset_y", 1)
 	_label.add_theme_constant_override("line_spacing", 4)
 	add_child(_label)
+	_course_label = Label.new()
+	_course_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_course_label.add_theme_font_size_override("font_size", 20)
+	_course_label.add_theme_color_override("font_color", Color(0.75, 0.97, 1.0))
+	_course_label.add_theme_color_override("font_shadow_color", Color(0.0, 0.0, 0.0, 0.85))
+	_course_label.add_theme_constant_override("shadow_offset_x", 1)
+	_course_label.add_theme_constant_override("shadow_offset_y", 1)
+	add_child(_course_label)
 
 
 func set_lines(content: String) -> void:
 	if _label != null and _label.text != content:
 		_label.text = content
+
+
+## Указатель курса рядом с машиной: текущий и заданный курс числами (раздел 7.3).
+## car_frac — положение машины на экране в долях экрана.
+func set_course_text(content: String, car_frac: Vector2) -> void:
+	if _course_label == null:
+		return
+	if _course_label.text != content:
+		_course_label.text = content
+	_course_label.position = size * car_frac + Vector2(28.0, -52.0)
 
 
 ## Показать или скрыть метку стандартного положения машины на экране.

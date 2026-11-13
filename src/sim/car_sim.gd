@@ -213,3 +213,9 @@ func range_at_speed(speed: float, fuel: float, surface: SurfaceParams, grade: fl
 	if empty_force <= 0.0:
 		return INF
 	return log(1.0 + per_kg * fuel / empty_force) / (per_kg * params.fuel_per_joule)
+
+
+## Положение руля, которое даёт такое боковое ускорение (м/с², плюс — вправо)
+## на твёрдом грунте при этой массе.
+func steer_for_lateral_accel(accel: float, mass: float) -> float:
+	return clampf(accel / tires.lateral_limit_dry(mass), -1.0, 1.0)

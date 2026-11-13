@@ -6,7 +6,7 @@ extends RefCounted
 ## она спрашивает у модели (сопротивление, предел тяги, предел сцепления).
 ## Рельеф она не предвидит: подъём оплачивается топливом по факту.
 ##
-## Курс и точка появятся здесь на шагах 3 и 4.
+## Точка появится здесь на шаге 4.
 
 const CarSim = preload("res://src/sim/car_sim.gd")
 const CarState = preload("res://src/sim/car_state.gd")
@@ -21,6 +21,18 @@ func throttle(sim: CarSim, state: CarState, terrain: TerrainSample, mode: int, v
 	if mode == Command.TargetMode.CONSUMPTION:
 		return _hold_consumption(sim, forward, value)
 	return _hold_speed(sim, state, terrain, forward, value)
+
+
+## Руль от -1 до 1, чтобы повернуть нос на курс course (радианы) и держать его.
+## Автоматика поворачивает плавно: использует не больше autopilot_lateral_share
+## доступной боковой силы шин на этом покрытии, поэтому манёвр не стоит скорости.
+func steer(sim: CarSim, state: CarState, terrain: TerrainSample, course: float) -> float:
+	var mass: float = sim.total_mass(state.fuel)
+	var forward: float = maxf(state.forward_speed(), 0.0)
+	var limit: float = sim.max_lateral_accel(mass, terrain.surface, sim.params.autopilot_lateral_share)
+	var error: float = wrapf(course - state.heading, -PI, PI)
+	var accel: float = clampf(sim.params.autopilot_course_gain * error * forward, -limit, limit)
+	return sim.steer_for_lateral_accel(accel, mass)
 
 
 ## Держать расход: двигатель отдаёт постоянную мощность, скорость меняется сама.
