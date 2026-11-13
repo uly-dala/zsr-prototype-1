@@ -1,5 +1,5 @@
 extends RefCounted
-## Автопроверки шагов 0–5. Запускаются без окна: см. run_checks.bat.
+## Автопроверки шагов 0–6. Запускаются без окна: см. run_checks.bat.
 ##
 ## Ожидаемые числа взяты из таблиц дизайн-документа (разделы 3.4, 3.5, 4.2, 6, 7.1)
 ## и из независимого расчёта той же модели.
@@ -17,6 +17,9 @@ const CameraParams = preload("res://src/view/camera_params.gd")
 const CameraRig = preload("res://src/view/camera_rig.gd")
 const WorldGenParams = preload("res://src/world/world_gen_params.gd")
 const GeneratedTerrain = preload("res://src/world/generated_terrain.gd")
+const StageLayout = preload("res://src/world/stage_layout.gd")
+const MapBuilder = preload("res://src/world/map_builder.gd")
+const MapView = preload("res://src/ui/map_view.gd")
 
 const DT: float = 1.0 / 60.0
 ## Скорость 108 км/ч в м/с.
@@ -78,6 +81,10 @@ func run() -> void:
 	_test_terrain()
 	_section("Ветер и удары (5.3, 5.4)")
 	_test_wind_and_hits()
+	_section("Маршрут, ориентиры, контрольные точки (2.1, 7.3)")
+	_test_stage()
+	_section("Карта и линейка (7.2, 9.4)")
+	_test_map()
 
 
 # --- Проверки ---------------------------------------------------------------
@@ -626,6 +633,107 @@ func _test_point_camera() -> void:
 	_true("режим 1: положение машины на экране не меняется", follow.car_frac == start and not follow.is_tracking_point())
 
 
+func _test_stage() -> void:
+	var world_params: WorldGenParams = load("res://data/world_default.tres") as WorldGenParams
+	var layout: StageLayout = StageLayout.new(world_params)
+	var twin: StageLayout = StageLayout.new(world_params)
+	_true("маршрут воспроизводим", layout.checkpoints == twin.checkpoints and layout.landmarks.size() == twin.landmarks.size())
+	_true("контрольных точек четыре", layout.checkpoints.size() == world_params.checkpoint_count)
+	var route_ok: bool = true
+	var previous: Vector2 = layout.start
+	var worst_deviation: float = 0.0
+	for checkpoint in layout.checkpoints:
+		var leg: Vector2 = checkpoint - previous
+		var deviation: float = absf(rad_to_deg(atan2(leg.x, leg.y)))
+		worst_deviation = maxf(worst_deviation, deviation)
+		if leg.length() < 2000.0 or leg.length() > 4000.0:
+			route_ok = false
+		if checkpoint.x < world_params.area_min.x or checkpoint.x > world_params.area_max.x:
+			route_ok = false
+		if checkpoint.y < world_params.area_min.y or checkpoint.y > world_params.area_max.y:
+			route_ok = false
+		previous = checkpoint
+	_true("отрезки от 2 до 4 км, точки внутри местности", route_ok)
+	_true("отклонение от севера не больше 45° (наибольшее %.0f°)" % worst_deviation, worst_deviation <= 45.0)
+	_near("длина маршрута, км", layout.route_length / 1000.0, 14.0, 2.0)
+
+	# Ориентиры: 20–25, с уникальными именами, не вплотную друг к другу.
+	var names: Dictionary = {}
+	var spacing_ok: bool = true
+	for i in layout.landmarks.size():
+		var one: Dictionary = layout.landmarks[i]
+		names[one["name"]] = true
+		for j in i:
+			var two: Dictionary = layout.landmarks[j]
+			if Vector2(one["x"], one["y"]).distance_to(Vector2(two["x"], two["y"])) < world_params.landmark_spacing:
+				spacing_ok = false
+	_true("ориентиров от 20 до 25 (%d)" % layout.landmarks.size(), layout.landmarks.size() >= 20 and layout.landmarks.size() <= 25)
+	_true("у каждого ориентира своё имя", names.size() == layout.landmarks.size())
+	_true("ориентиры не ближе 700 м друг к другу", spacing_ok)
+
+	# У контрольных точек и ориентиров нет препятствий и скользких полей.
+	var world: GeneratedTerrain = GeneratedTerrain.new(world_params, _hard, _sand, _slick, layout.clear_zones())
+	var clear_ok: bool = true
+	for checkpoint in layout.checkpoints:
+		if world.field_at(checkpoint.x, checkpoint.y) >= 0:
+			clear_ok = false
+		for angle in 8:
+			var probe: Vector2 = checkpoint + Vector2(cos(angle * TAU / 8.0), sin(angle * TAU / 8.0)) * 30.0
+			if world.obstacle_near(probe.x, probe.y, 1.0).z > 0.0:
+				clear_ok = false
+	for landmark in layout.landmarks:
+		if world.field_at(landmark["x"], landmark["y"]) >= 0 or world.obstacle_near(landmark["x"], landmark["y"], 1.0).z > 0.0:
+			clear_ok = false
+	_true("у контрольных точек и ориентиров нет препятствий и скользких полей", clear_ok)
+
+	# Точки проходятся по порядку.
+	var race: RaceSim = _new_race(250.0, 0.0)
+	var car = race.cars[0]
+	race.checkpoints = PackedVector2Array([Vector2(0.0, 300.0), Vector2(0.0, 600.0), Vector2(0.0, 900.0)])
+	race.checkpoint_radius = 40.0
+	car.state.y = 590.0
+	race.step()
+	_true("вторая точка раньше первой не засчитывается", car.next_checkpoint == 0)
+	car.state.y = 265.0
+	race.step()
+	_true("первая точка засчитана в радиусе 40 м", car.next_checkpoint == 1 and car.checkpoint_steps.size() == 1)
+	car.state.x = 45.0
+	car.state.y = 600.0
+	race.step()
+	_true("мимо точки дальше 40 м — не засчитано", car.next_checkpoint == 1)
+	car.state.x = 0.0
+	race.step()
+	car.state.y = 900.0
+	race.step()
+	_true("последняя точка — финиш", car.next_checkpoint == 3 and car.finish_step == race.step_index - 1)
+	race.step()
+	_true("после финиша счёт точек не меняется", car.next_checkpoint == 3 and car.checkpoint_steps.size() == 3)
+
+
+func _test_map() -> void:
+	var world: GeneratedTerrain = _new_world()
+	var world_params: WorldGenParams = world.params
+	# Малый участок, чтобы проверка шла быстро: 2 × 3 км.
+	var image: Image = MapBuilder.build_image(world, Vector2(-1000.0, 0.0), Vector2(1000.0, 3000.0))
+	_true("картинка карты: 1 пиксель на 25 м (80 × 120)", image.get_width() == 80 and image.get_height() == 120)
+	var full_width: float = (world_params.area_max.x - world_params.area_min.x) / world_params.map_meters_per_pixel
+	var full_height: float = (world_params.area_max.y - world_params.area_min.y) / world_params.map_meters_per_pixel
+	_true("карта короткого формата: %d × %d пикселей" % [int(full_width), int(full_height)], int(full_width) == 240 and int(full_height) == 520)
+	# Скользкое поле на карте окрашено цветом скользкого покрытия.
+	var circle: Vector3 = world.field_circle(0)
+	var small: Image = MapBuilder.build_image(world, Vector2(circle.x - 100.0, circle.y - 100.0), Vector2(circle.x + 100.0, circle.y + 100.0))
+	var pixel: Color = small.get_pixel(4, 4)
+	_true("скользкое поле на карте — цветом скользкого", absf(pixel.r - _slick.color.r) < 0.02 and absf(pixel.b - _slick.color.b) < 0.02)
+
+	# Линейка: курс и расстояние.
+	_near("линейка: на север, градусы", MapView.ruler_course(Vector2(0.0, 0.0), Vector2(0.0, 1000.0)), 0.0, 0.001)
+	_near("линейка: на восток, градусы", MapView.ruler_course(Vector2(0.0, 0.0), Vector2(1000.0, 0.0)), 90.0, 0.001)
+	_near("линейка: на юго-запад, градусы", MapView.ruler_course(Vector2(500.0, 500.0), Vector2(0.0, 0.0)), 225.0, 0.001)
+	_near("линейка: расстояние, км", MapView.ruler_distance_km(Vector2(0.0, 0.0), Vector2(3000.0, 4000.0)), 5.0, 0.001)
+	# Раздел 7.3: ошибка 5° на отрезке 3 км даёт около 260 м промаха.
+	_near("промах при ошибке 5° на 3 км, м", 3000.0 * sin(deg_to_rad(5.0)), 260.0, 2.0)
+
+
 func _new_world() -> GeneratedTerrain:
 	var world_params: WorldGenParams = load("res://data/world_default.tres") as WorldGenParams
 	return GeneratedTerrain.new(world_params, _hard, _sand, _slick)
@@ -816,15 +924,26 @@ func _test_wind_and_hits() -> void:
 	_true("касание медленнее 2 м/с — не удар", slow_car.hits == 0 and slow_car.blocked_left == 0.0 and slow_car.state.speed() < 0.001)
 
 	# Заезд по настоящей местности: воспроизводимость вместе с ударами.
-	var first: Array = _world_race()
-	var second: Array = _world_race()
+	var first: Array = _world_race(true)
+	var second: Array = _world_race(true)
 	_true("заезд по местности из генератора воспроизводим", first == second)
-	_true("машина проехала больше 2 км (%.0f м, ударов %d)" % [first[1], first[3]], first[1] > 2000.0)
+	# Автоматика препятствий не видит: без объезда она упирается в первый же камень.
+	_true("без объезда машина упирается в камень (проехала %.0f м, ударов %d)" % [first[1], first[3]],
+		first[3] >= 1 and first[1] < 5000.0)
+	# Без препятствий: три минуты по рельефу, песку и скользким полям.
+	var open_ground: Array = _world_race(false)
+	_true("без препятствий машина проехала больше 4 км (%.0f м)" % open_ground[1],
+		open_ground[1] > 4000.0 and open_ground[3] == 0)
 
 
 ## Три минуты по местности из генератора на автоматике: курс на север, 108 км/ч.
-func _world_race() -> Array:
-	var race: RaceSim = RaceSim.new(_new_world())
+func _world_race(with_obstacles: bool) -> Array:
+	var world: GeneratedTerrain = _new_world()
+	if not with_obstacles:
+		var bare: WorldGenParams = world.params.duplicate() as WorldGenParams
+		bare.obstacle_density = 0.0
+		world = GeneratedTerrain.new(bare, _hard, _sand, _slick)
+	var race: RaceSim = RaceSim.new(world)
 	race.add_car(_params, 500.0, 0.0, 0.0, 0.0)
 	race.submit(Command.new(Command.Type.SET_TARGET, 0, Command.TargetMode.SPEED, 108.0))
 	race.submit(Command.new(Command.Type.SET_COURSE, 0, 0.0, 0.0, true))

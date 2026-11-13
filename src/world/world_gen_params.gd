@@ -13,6 +13,36 @@ extends Resource
 ## Вокруг старта нет препятствий и скользких полей, м.
 @export var start_clear_radius: float = 80.0
 
+@export_group("Маршрут")
+## Контрольных точек на этапе; последняя — финиш.
+@export var checkpoint_count: int = 4
+## Длина маршрута по прямым между точками, м.
+@export var route_length: float = 14000.0
+## Соотношение длин отрезков: каждый получает случайную долю в этих пределах,
+## затем отрезки растягиваются так, чтобы в сумме дать route_length.
+@export var segment_min: float = 3200.0
+@export var segment_max: float = 3800.0
+## Отклонение отрезка от севера, градусы (в документе не больше 45).
+## Маршрут 14 км умещается в 13 км местности только зигзагом.
+@export var deviation_min: float = 25.0
+@export var deviation_max: float = 42.0
+## Радиус контрольной точки, м.
+@export var checkpoint_radius: float = 40.0
+
+@export_group("Ориентиры")
+## Сколько ориентиров на местности.
+@export var landmark_count: int = 22
+## Ориентиры стоят не ближе друг к другу, м.
+@export var landmark_spacing: float = 700.0
+
+@export_group("Карта")
+## Разрешение картинки карты: метров на пиксель.
+@export var map_meters_per_pixel: float = 25.0
+## Шаг горизонталей на карте, м.
+@export var map_contour_interval: float = 10.0
+## Шаг сетки на карте, м.
+@export var map_grid_step: float = 500.0
+
 @export_group("Рельеф")
 ## Размах высот: высота меняется от -amplitude до +amplitude, м.
 @export var height_amplitude: float = 45.0

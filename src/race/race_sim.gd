@@ -17,6 +17,10 @@ var cars: Array = []
 var step_index: int = 0
 ## Все принятые команды с номерами шагов. Вместе с начальным состоянием это повтор.
 var command_log: Array = []
+## Контрольные точки по порядку: x — восток, y — север. Последняя — финиш.
+var checkpoints: PackedVector2Array = PackedVector2Array()
+## Радиус контрольной точки, м.
+var checkpoint_radius: float = 40.0
 
 
 func _init(p_terrain) -> void:
@@ -53,7 +57,23 @@ func step() -> void:
 		var obstacle: Vector3 = terrain.obstacle_near(car.state.x, car.state.y, margin)
 		if obstacle.z > 0.0:
 			car.collide(obstacle.x, obstacle.y, obstacle.z + margin)
+		_check_checkpoint(car)
 	step_index += 1
+
+
+## Точки проходятся по порядку: пропущенная не засчитывается, нужно вернуться.
+func _check_checkpoint(car: Car) -> void:
+	if car.next_checkpoint >= checkpoints.size():
+		return
+	var target: Vector2 = checkpoints[car.next_checkpoint]
+	var d_east: float = car.state.x - target.x
+	var d_north: float = car.state.y - target.y
+	if d_east * d_east + d_north * d_north > checkpoint_radius * checkpoint_radius:
+		return
+	car.checkpoint_steps.append(step_index)
+	car.next_checkpoint += 1
+	if car.next_checkpoint == checkpoints.size():
+		car.finish_step = step_index
 
 
 ## Время заезда, с.

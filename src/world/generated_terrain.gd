@@ -30,10 +30,16 @@ var _fields: PackedFloat32Array = PackedFloat32Array()
 var _field_grid: Dictionary = {}
 var _sample: TerrainSample = TerrainSample.new()
 var _obstacle_cache: Dictionary = {}
+# Места без препятствий и скользких полей: x — восток, y — север, z — радиус.
+var _clear_zones: PackedVector3Array = PackedVector3Array()
 
 
-func _init(p_params: WorldGenParams, p_hard: SurfaceParams, p_sand: SurfaceParams, p_slick: SurfaceParams) -> void:
+## clear_zones — места, где не должно быть препятствий и скользких полей
+## (старт, контрольные точки, ориентиры): x — восток, y — север, z — радиус.
+func _init(p_params: WorldGenParams, p_hard: SurfaceParams, p_sand: SurfaceParams, p_slick: SurfaceParams,
+		clear_zones: PackedVector3Array = PackedVector3Array()) -> void:
 	params = p_params
+	_clear_zones = clear_zones
 	hard = p_hard
 	sand = p_sand
 	slick = p_slick
@@ -169,6 +175,8 @@ func build_obstacles(cx: int, cy: int) -> PackedFloat32Array:
 		var kind: float = float(rng.randi() % 2)
 		if x * x + y * y < clear * clear:
 			continue
+		if _in_clear_zone(x, y, radius):
+			continue
 		# На скользких полях препятствий нет (раздел 5.4).
 		if _near_field(x, y, radius):
 			continue
@@ -233,6 +241,17 @@ func _near_field(x: float, y: float, radius: float) -> bool:
 	return false
 
 
+## Задевает ли круг (x, y, radius) место, которое должно быть свободным.
+func _in_clear_zone(x: float, y: float, radius: float) -> bool:
+	for zone in _clear_zones:
+		var d_east: float = x - zone.x
+		var d_north: float = y - zone.y
+		var reach: float = zone.z + radius
+		if d_east * d_east + d_north * d_north < reach * reach:
+			return true
+	return false
+
+
 ## Расставить скользкие поля: сначала заданные вручную, потом из зерна.
 func _place_fields() -> void:
 	var rng: RandomNumberGenerator = RandomNumberGenerator.new()
@@ -250,6 +269,8 @@ func _place_fields() -> void:
 		if sqrt(x * x + y * y) < radius + params.start_clear_radius + 200.0:
 			continue
 		if _near_field(x, y, radius):
+			continue
+		if _in_clear_zone(x, y, radius):
 			continue
 		_add_field(x, y, radius, rng)
 		placed += 1

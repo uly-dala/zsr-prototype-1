@@ -47,6 +47,12 @@ var points_passed: int = 0
 var points_dropped: int = 0
 ## Отклонено команд: точка вне допустимой зоны.
 var points_rejected: int = 0
+## Номер следующей контрольной точки, с нуля. Равен числу точек после финиша.
+var next_checkpoint: int = 0
+## Шаги симуляции, на которых пройдены контрольные точки.
+var checkpoint_steps: PackedInt32Array = PackedInt32Array()
+## Шаг финиша или -1.
+var finish_step: int = -1
 ## Ударов о препятствия.
 var hits: int = 0
 ## Сколько ещё секунд управление заблокировано после удара.
