@@ -21,6 +21,24 @@ func get_surface() -> SurfaceParams:
 	return _sample.surface
 
 
+## Одно препятствие для проверок: x — восток, y — север, z — радиус.
+## При нулевом радиусе препятствий на плоскости нет.
+var test_obstacle: Vector3 = Vector3.ZERO
+
+
+## Препятствие, которого касается машина: x — восток, y — север, z — радиус.
+## Если касания нет, радиус равен нулю.
+func obstacle_near(x: float, y: float, margin: float) -> Vector3:
+	if test_obstacle.z <= 0.0:
+		return Vector3.ZERO
+	var d_east: float = test_obstacle.x - x
+	var d_north: float = test_obstacle.y - y
+	var touch: float = test_obstacle.z + margin
+	if d_east * d_east + d_north * d_north < touch * touch:
+		return test_obstacle
+	return Vector3.ZERO
+
+
 ## x — восток, y — север, метры.
 func sample(_x: float, _y: float) -> TerrainSample:
 	return _sample

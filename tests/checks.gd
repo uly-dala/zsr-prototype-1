@@ -1,5 +1,5 @@
 extends RefCounted
-## Автопроверки шагов 0–4. Запускаются без окна: см. run_checks.bat.
+## Автопроверки шагов 0–5. Запускаются без окна: см. run_checks.bat.
 ##
 ## Ожидаемые числа взяты из таблиц дизайн-документа (разделы 3.4, 3.5, 4.2, 6, 7.1)
 ## и из независимого расчёта той же модели.
@@ -15,6 +15,8 @@ const Command = preload("res://src/sim/command.gd")
 const RaceSim = preload("res://src/race/race_sim.gd")
 const CameraParams = preload("res://src/view/camera_params.gd")
 const CameraRig = preload("res://src/view/camera_rig.gd")
+const WorldGenParams = preload("res://src/world/world_gen_params.gd")
+const GeneratedTerrain = preload("res://src/world/generated_terrain.gd")
 
 const DT: float = 1.0 / 60.0
 ## Скорость 108 км/ч в м/с.
@@ -72,6 +74,10 @@ func run() -> void:
 	_test_point()
 	_section("Камера при движении к точке (7.1.1)")
 	_test_point_camera()
+	_section("Местность из генератора (5, 9.4)")
+	_test_terrain()
+	_section("Ветер и удары (5.3, 5.4)")
+	_test_wind_and_hits()
 
 
 # --- Проверки ---------------------------------------------------------------
@@ -620,6 +626,213 @@ func _test_point_camera() -> void:
 	_true("режим 1: положение машины на экране не меняется", follow.car_frac == start and not follow.is_tracking_point())
 
 
+func _new_world() -> GeneratedTerrain:
+	var world_params: WorldGenParams = load("res://data/world_default.tres") as WorldGenParams
+	return GeneratedTerrain.new(world_params, _hard, _sand, _slick)
+
+
+func _test_terrain() -> void:
+	var world: GeneratedTerrain = _new_world()
+	var twin: GeneratedTerrain = _new_world()
+	var world_params: WorldGenParams = world.params
+	# Одно зерно — одна местность.
+	var same: bool = true
+	var max_grade: float = 0.0
+	var max_height: float = 0.0
+	var counts: Dictionary = {"hard": 0, "sand": 0, "slick": 0}
+	var rng: RandomNumberGenerator = RandomNumberGenerator.new()
+	rng.seed = 12345
+	for i in 4000:
+		var x: float = rng.randf_range(world_params.area_min.x, world_params.area_max.x)
+		var y: float = rng.randf_range(world_params.area_min.y, world_params.area_max.y)
+		var first: TerrainSample = world.sample(x, y)
+		var height: float = first.height
+		var grade: float = sqrt(first.grade_east * first.grade_east + first.grade_north * first.grade_north)
+		var surface_id: String = first.surface.id
+		var second: TerrainSample = twin.sample(x, y)
+		if second.height != height or second.surface.id != surface_id:
+			same = false
+		max_grade = maxf(max_grade, grade)
+		max_height = maxf(max_height, absf(height))
+		counts[surface_id] += 1
+	_true("одно зерно даёт одну и ту же местность", same)
+	_true("уклон не больше 15 %% (наибольший %.1f %%)" % (max_grade * 100.0), max_grade <= world_params.max_grade + 0.0001)
+	_true("рельеф есть: уклоны до %.1f %%, высоты до %d м" % [max_grade * 100.0, int(max_height)], max_grade > 0.05 and max_height > 10.0)
+	_true("есть все три покрытия: грунт %d, песок %d, скользкое %d из 4000" % [counts["hard"], counts["sand"], counts["slick"]],
+		counts["hard"] > 1500 and counts["sand"] > 100 and counts["slick"] > 20)
+	# Другое зерно — другая местность.
+	var other_params: WorldGenParams = world_params.duplicate() as WorldGenParams
+	other_params.world_seed = world_params.world_seed + 1
+	var other: GeneratedTerrain = GeneratedTerrain.new(other_params, _hard, _sand, _slick)
+	_true("другое зерно даёт другую местность", other.height_at(500.0, 2000.0) != world.height_at(500.0, 2000.0))
+
+	# Скользкие поля: ровные, с ветром, без препятствий.
+	_true("скользких полей столько, сколько задано", world.field_count() == world_params.slick_count)
+	var fields_ok: bool = true
+	for field in world.field_count():
+		var circle: Vector3 = world.field_circle(field)
+		var inside: TerrainSample = world.sample(circle.x, circle.y)
+		var wind: float = sqrt(inside.wind_east * inside.wind_east + inside.wind_north * inside.wind_north)
+		if inside.surface.id != "slick" or inside.grade_east != 0.0 or inside.grade_north != 0.0:
+			fields_ok = false
+		if wind < world_params.wind_min - 0.001 or wind > world_params.wind_max + 0.001:
+			fields_ok = false
+		if circle.z < world_params.slick_radius_min or circle.z > world_params.slick_radius_max:
+			fields_ok = false
+	_true("поля скользкие, ровные, с ветром от 0,2 до 0,5 м/с²", fields_ok)
+	_true("на старте не скользко", world.sample(0.0, 0.0).surface.id != "slick")
+
+	# Препятствия: из зерна и координат части, в заданных размерах, не на скользком.
+	var total: int = 0
+	var obstacles_ok: bool = true
+	for cx in range(-3, 3):
+		for cy in range(0, 8):
+			var list: PackedFloat32Array = world.build_obstacles(cx, cy)
+			if list != twin.build_obstacles(cx, cy):
+				obstacles_ok = false
+			var index: int = 0
+			while index < list.size():
+				total += 1
+				var radius: float = list[index + 2]
+				if radius < world_params.obstacle_radius_min or radius > world_params.obstacle_radius_max:
+					obstacles_ok = false
+				if world.field_at(list[index], list[index + 1]) >= 0:
+					obstacles_ok = false
+				if floor(list[index] / world_params.chunk_size) != cx or floor(list[index + 1] / world_params.chunk_size) != cy:
+					obstacles_ok = false
+				index += 4
+	_true("препятствия воспроизводимы, нужного размера, не на скользком", obstacles_ok)
+	var area_km2: float = 48.0 * world_params.chunk_size * world_params.chunk_size / 1000000.0
+	_near("плотность препятствий, на км²", total / area_km2, world_params.obstacle_density, 40.0)
+	_true("у старта препятствий нет", world.obstacle_near(0.0, 0.0, 1.0).z == 0.0 and world.obstacle_near(30.0, 30.0, 1.0).z == 0.0)
+	var some: PackedFloat32Array = world.build_obstacles(1, 3)
+	if some.size() >= 4:
+		var hit: Vector3 = world.obstacle_near(some[0], some[1], 1.0)
+		_true("препятствие находится по своим координатам", hit.z > 0.0 and absf(hit.z - some[2]) < 0.001)
+		_true("рядом с препятствием касания с ним нет", world.obstacle_near(some[0] + some[2] + 1.5, some[1], 1.0) != hit)
+	else:
+		_report(false, "в части (1, 3) нет препятствий")
+
+	# Данные картинки части.
+	var cells: int = world_params.chunk_cells
+	var data: PackedFloat32Array = world.build_chunk_data(2, -5)
+	_true("данные части: по четыре числа на узел сетки", data.size() == (cells + 1) * (cells + 1) * 4)
+	var step_size: float = world_params.chunk_size / cells
+	var node: int = (7 * (cells + 1) + 20) * 4
+	_near("данные части совпадают со слоем данных: высота, м", data[node],
+		world.height_at(2.0 * world_params.chunk_size + 20.0 * step_size, -(-5.0 * world_params.chunk_size + 7.0 * step_size)), 0.0001)
+	# Соседние части сходятся на стыке.
+	var neighbour: PackedFloat32Array = world.build_chunk_data(3, -5)
+	_near("стык частей: высота на общей границе", data[(7 * (cells + 1) + cells) * 4], neighbour[(7 * (cells + 1)) * 4], 0.0001)
+
+
+func _test_wind_and_hits() -> void:
+	# Ветер 0,2 и 0,5 м/с² поперёк пути, поле 500 м на 108 км/ч: снос 30–70 м.
+	var strengths: Array = [0.2, 0.5]
+	var shifts: Array = [27.8, 69.4]
+	for i in strengths.size():
+		var state: CarState = _new_state(250.0, V108)
+		var input: CarInput = CarInput.new()
+		var on_field: TerrainSample = _terrain(_slick, 0.0)
+		on_field.wind_east = strengths[i]
+		var steps: int = 0
+		while state.y < 500.0 and steps < 3000:
+			# Газ держит скорость; руль прямо: нос остаётся на курсе.
+			input.throttle = _sim.thrust_for_speed(V108, _sim.total_mass(state.fuel), _slick) / _sim.engine.max_thrust_at(V108)
+			_sim.step(state, input, on_field, DT)
+			steps += 1
+		_near("ветер %.1f м/с²: снос за 500 м, м" % strengths[i], state.x, shifts[i], 3.0)
+		_near("ветер %.1f м/с²: нос остался на курсе, градусы" % strengths[i], wrapf(state.heading_deg(), -180.0, 180.0), 0.0, 0.001)
+		# После поля снос прекращается, смещение остаётся.
+		var off_field: TerrainSample = _terrain(_hard, 0.0)
+		input.throttle = 0.0
+		for j in 120:
+			_sim.step(state, input, off_field, DT)
+		var x_after: float = state.x
+		for j in 120:
+			_sim.step(state, input, off_field, DT)
+		_near("ветер %.1f м/с²: после поля машину больше не сносит, м" % strengths[i], state.x - x_after, 0.0, 0.01)
+		_true("ветер %.1f м/с²: смещение осталось" % strengths[i], state.x > shifts[i] - 3.0)
+	# На твёрдом грунте ветер не действует: слой данных его не даёт.
+	var world: GeneratedTerrain = _new_world()
+	var found_wind: bool = false
+	for i in 200:
+		var probe: TerrainSample = world.sample(-2500.0 + i * 25.0, 300.0)
+		if probe.surface.id != "slick" and (probe.wind_east != 0.0 or probe.wind_north != 0.0):
+			found_wind = true
+	_true("на обычном грунте ветра нет", not found_wind)
+
+	# Удар в лоб: препятствие сплошное, машина останавливается перед ним.
+	var race: RaceSim = _cruising_race()
+	var car = race.cars[0]
+	var rock: Vector3 = Vector3(car.state.x, car.state.y + 200.0, 5.0)
+	race.terrain.test_obstacle = rock
+	var touch: float = rock.z + _params.collision_margin
+	_steps(race, 420)
+	_true("удар в лоб засчитан один раз", car.hits == 1)
+	_near("машина стоит на границе препятствия, м", rock.y - car.state.y, touch, 0.05)
+	_true("управление на секунду заблокировано", car.blocked_left > 0.0 and not car.auto_throttle)
+	_steps(race, 600)
+	_true("автоматика упирается и стоит: насквозь не проехать", car.state.speed() < 0.1 and rock.y - car.state.y >= touch - 0.05)
+	_true("стоя у препятствия, машина не получает новых ударов", car.hits == 1)
+	var fuel_stuck: float = car.state.fuel
+	_steps(race, 300)
+	_near("упёршись, машина топливо не тратит, кг", fuel_stuck - car.state.fuel, 0.0, 0.01)
+	# Задний ход: S с места.
+	race.submit(Command.new(Command.Type.MANUAL, 0, 0.0, -1.0))
+	_steps(race, 180)
+	_true("S с места: задний ход", car.is_reversing() and rock.y - car.state.y > touch + 5.0)
+	_near("задний ход: скорость не выше предела, м/с", -car.state.forward_speed(), _params.reverse_max_speed, 0.5)
+	_true("задний ход тратит топливо", fuel_stuck - car.state.fuel > 0.05)
+	_near("задний ход: нос по-прежнему на север, градусы", wrapf(car.state.heading_deg(), -180.0, 180.0), 0.0, 0.01)
+	# W при движении назад сначала тормозит, потом едет вперёд.
+	race.submit(Command.new(Command.Type.MANUAL, 0, 0.0, 1.0))
+	_steps(race, 12)
+	_true("W при движении назад: сначала тормоз", car.state.thrust == 0.0 and car.state.forward_speed() < 0.0)
+	_steps(race, 120)
+	_true("W: затем вперёд", car.state.forward_speed() > 1.0)
+	race.submit(Command.new(Command.Type.MANUAL, 0, 0.0, 0.0))
+	# Руль на заднем ходу поворачивает нос в обратную сторону.
+	var back: RaceSim = _new_race(250.0, 0.0)
+	back.submit(Command.new(Command.Type.MANUAL, 0, 1.0, -1.0))
+	_steps(back, 120)
+	_true("задний ход с рулём вправо: нос уходит влево", back.cars[0].state.heading_deg() > 180.0)
+	# Автоматика назад не ездит: при заданном нуле машина стоит.
+	var parked: RaceSim = _new_race(250.0, 0.0)
+	_steps(parked, 300)
+	_true("заданная скорость 0: машина стоит, а не пятится", parked.cars[0].state.speed() == 0.0 and parked.cars[0].state.y == 0.0)
+
+	# Удар вскользь: остаётся 20 % скорости вдоль препятствия.
+	var glance: RaceSim = _new_race(250.0, V108)
+	var glance_car = glance.cars[0]
+	var side: float = 6.0 / sqrt(2.0)
+	glance_car.collide(glance_car.state.x - side + 0.1, glance_car.state.y + side, 6.0)
+	_near("удар под 45°: осталось скорости, м/с", glance_car.state.speed(), V108 * sin(deg_to_rad(45.0)) * 0.2, 0.3)
+	_true("удар под 45° засчитан", glance_car.hits == 1 and glance_car.blocked_left > 0.0)
+	# Медленное касание — не удар.
+	var slow: RaceSim = _new_race(250.0, 1.0)
+	var slow_car = slow.cars[0]
+	slow_car.collide(slow_car.state.x, slow_car.state.y + 5.5, 6.0)
+	_true("касание медленнее 2 м/с — не удар", slow_car.hits == 0 and slow_car.blocked_left == 0.0 and slow_car.state.speed() < 0.001)
+
+	# Заезд по настоящей местности: воспроизводимость вместе с ударами.
+	var first: Array = _world_race()
+	var second: Array = _world_race()
+	_true("заезд по местности из генератора воспроизводим", first == second)
+	_true("машина проехала больше 2 км (%.0f м, ударов %d)" % [first[1], first[3]], first[1] > 2000.0)
+
+
+## Три минуты по местности из генератора на автоматике: курс на север, 108 км/ч.
+func _world_race() -> Array:
+	var race: RaceSim = RaceSim.new(_new_world())
+	race.add_car(_params, 500.0, 0.0, 0.0, 0.0)
+	race.submit(Command.new(Command.Type.SET_TARGET, 0, Command.TargetMode.SPEED, 108.0))
+	race.submit(Command.new(Command.Type.SET_COURSE, 0, 0.0, 0.0, true))
+	_steps(race, 10800)
+	var car = race.cars[0]
+	return [car.state.x, car.state.y, car.state.fuel, car.hits]
+
+
 func _new_race(fuel: float, speed: float) -> RaceSim:
 	var race: RaceSim = RaceSim.new(FlatTerrain.new(_hard))
 	var car = race.add_car(_params, fuel, 0.0, 0.0, 0.0)
@@ -648,17 +861,20 @@ func _terrain(surface: SurfaceParams, grade_north: float) -> TerrainSample:
 	return terrain
 
 
+## throttle: плюс — газ, минус — тормоз.
 func _step(state: CarState, steer: float, throttle: float, surface: SurfaceParams, grade_north: float) -> void:
 	var input: CarInput = CarInput.new()
 	input.steer = steer
-	input.throttle = throttle
+	input.throttle = maxf(throttle, 0.0)
+	input.brake = maxf(-throttle, 0.0)
 	_sim.step(state, input, _terrain(surface, grade_north), DT)
 
 
 func _run(state: CarState, steer: float, throttle: float, surface: SurfaceParams, steps: int) -> void:
 	var input: CarInput = CarInput.new()
 	input.steer = steer
-	input.throttle = throttle
+	input.throttle = maxf(throttle, 0.0)
+	input.brake = maxf(-throttle, 0.0)
 	var terrain: TerrainSample = _terrain(surface, 0.0)
 	for i in steps:
 		_sim.step(state, input, terrain, DT)

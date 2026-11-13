@@ -4,7 +4,8 @@ extends Node2D
 ## Шаги 1–3 дизайн-документа: одна машина на пустой плоскости, WASD,
 ## силы и масса, камера, удержание скорости и расхода, экран заезда,
 ## основное направление и указатель курса, точка, зона клика и камера
-## при движении к точке.
+## при движении к точке, местность из генератора с подгрузкой частями,
+## покрытия, ветер, препятствия.
 ##
 ## Узел только связывает части между собой:
 ##   ввод игрока -> команды -> RaceSim (фиксированный шаг 60 раз в секунду)
@@ -13,6 +14,9 @@ extends Node2D
 const CarParams = preload("res://src/sim/car_params.gd")
 const SurfaceParams = preload("res://src/sim/surface_params.gd")
 const FlatTerrain = preload("res://src/sim/flat_terrain.gd")
+const WorldGenParams = preload("res://src/world/world_gen_params.gd")
+const GeneratedTerrain = preload("res://src/world/generated_terrain.gd")
+const ChunkStreamer = preload("res://src/view/chunk_streamer.gd")
 const RaceSim = preload("res://src/race/race_sim.gd")
 const Car = preload("res://src/race/car.gd")
 const Recorder = preload("res://src/race/recorder.gd")
@@ -30,6 +34,7 @@ const Command = preload("res://src/sim/command.gd")
 
 const CAR_PARAMS_PATH: String = "res://data/car_default.tres"
 const CAMERA_PARAMS_PATH: String = "res://data/camera_default.tres"
+const WORLD_PARAMS_PATH: String = "res://data/world_default.tres"
 const SURFACE_PATHS: Array = [
 	"res://data/surface_hard.tres",
 	"res://data/surface_sand.tres",
@@ -51,10 +56,17 @@ const POINT_MODE_NAMES: Array = ["следование", "по горизонт�
 
 var _car_params: CarParams
 var _surfaces: Array = []
-var _surface_index: int = 0
+## Местность: 0 — из генератора; 1, 2, 3 — отладочная плоскость
+## с одним покрытием (грунт, песок, скользкое).
+var _terrain_mode: int = 0
+var _generated: GeneratedTerrain
+var _flat: FlatTerrain
+var _streamer: ChunkStreamer
+var _show_chunks: bool = false
+var _seen_hits: int = 0
 var _burn_fuel: bool = true
 
-var _terrain: FlatTerrain
+var _terrain
 var _sim: RaceSim
 var _player: Car
 var _player_input: PlayerInput
@@ -97,9 +109,17 @@ func _ready() -> void:
 	assert(camera_params != null, "Не загружен файл параметров камеры")
 	_camera = CameraRig.new(camera_params)
 
+	var world_params: WorldGenParams = load(WORLD_PARAMS_PATH) as WorldGenParams
+	assert(world_params != null, "Не загружен файл параметров местности")
+	_generated = GeneratedTerrain.new(world_params, _surfaces[0], _surfaces[1], _surfaces[2])
+	_flat = FlatTerrain.new(_surfaces[0])
+
 	_world = Node2D.new()
 	_world.name = "World"
 	add_child(_world)
+	_streamer = ChunkStreamer.new()
+	_streamer.name = "Terrain"
+	_world.add_child(_streamer)
 	_grid = GroundGrid.new()
 	_grid.name = "GroundGrid"
 	_world.add_child(_grid)
@@ -126,6 +146,7 @@ func _ready() -> void:
 	_hud.name = "Hud"
 	layer.add_child(_hud)
 
+	_apply_terrain_mode()
 	_start_race()
 
 
@@ -135,7 +156,6 @@ func _exit_tree() -> void:
 
 ## Начать заезд заново: машина в начале координат, носом на север.
 func _start_race() -> void:
-	_terrain = FlatTerrain.new(_surfaces[_surface_index])
 	_sim = RaceSim.new(_terrain)
 	_player = _sim.add_car(_car_params, start_fuel, 0.0, 0.0, 0.0)
 	_player.sim.burn_fuel = _burn_fuel
@@ -143,12 +163,12 @@ func _start_race() -> void:
 	_odometer_zero = 0.0
 	_seen_passed = 0
 	_seen_dropped = 0
+	_seen_hits = 0
 	_camera.end_point(false)
 	_store_previous()
 	_trail.clear()
 	_trail.add_point(Vector2.ZERO)
 	_recorder.start()
-	_apply_surface_look()
 
 
 func _physics_process(_delta: float) -> void:
@@ -156,7 +176,7 @@ func _physics_process(_delta: float) -> void:
 		_player_input.poll(_sim)
 		_store_previous()
 		_sim.step()
-		_recorder.sample(_sim.step_index, _sim.time_seconds(), _player, _terrain.get_surface().id, false)
+		_recorder.sample(_sim.step_index, _sim.time_seconds(), _player, _surface_under_player().id, false)
 		if _sim.step_index % TRAIL_EVERY == 0:
 			_trail.add_point(Vector2(_player.state.x, -_player.state.y))
 
@@ -194,8 +214,13 @@ func _process(delta: float) -> void:
 	var viewport_size: Vector2 = get_viewport_rect().size
 	_update_point(car_pos, viewport_size, delta)
 	_world.transform = _camera.world_transform(car_pos, viewport_size)
-	_grid.visible_rect = _camera.visible_world_rect(car_pos, viewport_size)
-	_grid.queue_redraw()
+	_streamer.update_center(car_pos)
+	if _grid.visible:
+		_grid.visible_rect = _camera.visible_world_rect(car_pos, viewport_size)
+		_grid.queue_redraw()
+	if _player.hits != _seen_hits:
+		_seen_hits = _player.hits
+		_beeper.beep()
 
 	_course_view.set_course(_player.course_active, car_pos, deg_to_rad(_player.course_deg))
 	var course_text: String = "%.1f°" % s.heading_deg()
@@ -260,9 +285,13 @@ func _on_key(keycode: int) -> void:
 		KEY_R:
 			_start_race()
 		KEY_T:
-			_surface_index = (_surface_index + 1) % _surfaces.size()
-			_terrain.set_surface(_surfaces[_surface_index])
-			_apply_surface_look()
+			_terrain_mode = (_terrain_mode + 1) % 4
+			_apply_terrain_mode()
+			_sim.terrain = _terrain
+		KEY_F3:
+			_show_chunks = not _show_chunks
+			_streamer.show_borders = _show_chunks
+			_streamer.queue_redraw()
 		KEY_F:
 			_burn_fuel = not _burn_fuel
 			_player.sim.burn_fuel = _burn_fuel
@@ -391,14 +420,31 @@ func _change_fuel(delta_kg: float) -> void:
 	_player.state.mass = _player.sim.total_mass(_player.state.fuel)
 
 
-func _apply_surface_look() -> void:
-	var surface: SurfaceParams = _terrain.get_surface()
-	RenderingServer.set_default_clear_color(surface.color)
+## Выбрать местность по _terrain_mode: генератор или отладочная плоскость.
+func _apply_terrain_mode() -> void:
+	if _terrain_mode == 0:
+		_terrain = _generated
+		_streamer.set_terrain(_generated)
+		_streamer.visible = true
+		_grid.visible = false
+		RenderingServer.set_default_clear_color(_surfaces[0].color)
+	else:
+		_flat.set_surface(_surfaces[_terrain_mode - 1])
+		_terrain = _flat
+		_streamer.set_terrain(null)
+		_streamer.visible = false
+		_grid.visible = true
+		RenderingServer.set_default_clear_color(_surfaces[_terrain_mode - 1].color)
+
+
+func _surface_under_player() -> SurfaceParams:
+	return _terrain.sample(_player.state.x, _player.state.y).surface
 
 
 func _build_hud_text() -> String:
 	var s = _player.state
-	var surface: SurfaceParams = _terrain.get_surface()
+	var sample = _terrain.sample(s.x, s.y)
+	var surface: SurfaceParams = sample.surface
 	var seconds: int = int(_sim.time_seconds())
 	var hold_speed: bool = _player.target_mode == Command.TargetMode.SPEED
 
@@ -415,6 +461,11 @@ func _build_hud_text() -> String:
 	var control_text: String = ""
 	if _player.is_manual_active():
 		control_text = "     РУЧНОЕ"
+	if _player.is_reversing():
+		control_text += "     ЗАДНИЙ ХОД"
+	if _player.blocked_left > 0.0:
+		control_text = "     УДАР: управление заблокировано"
+	elif _player.is_manual_active():
 		if _player.auto_throttle:
 			control_text = "     РУЛЬ ВРУЧНУЮ"
 		elif _player.auto_steer:
@@ -456,9 +507,22 @@ func _build_hud_text() -> String:
 	if not _burn_fuel:
 		burn_text = "ВЫКЛЮЧЕН"
 	lines.append("")
-	lines.append("покрытие: %s     зум %d (%d м по высоте экрана)" % [
-		surface.title, _camera.zoom_index + 1, roundi(_camera.ground_height()),
+	var terrain_text: String = "из генератора"
+	if _terrain_mode != 0:
+		terrain_text = "отладочная плоскость"
+	var grade: float = sample.grade_east * sin(s.heading) + sample.grade_north * cos(s.heading)
+	var wind: float = sqrt(sample.wind_east * sample.wind_east + sample.wind_north * sample.wind_north)
+	lines.append("местность: %s     покрытие: %s     уклон по ходу %.1f %%     ветер %.2f м/с²     ударов %d" % [
+		terrain_text, surface.title, grade * 100.0, wind, _player.hits,
 	])
+	lines.append("зум %d (%d м по высоте экрана)     высота %d м     снос ветром %.1f м/с" % [
+		_camera.zoom_index + 1, roundi(_camera.ground_height()), roundi(sample.height),
+		sqrt(s.drift_east * s.drift_east + s.drift_north * s.drift_north),
+	])
+	if _show_chunks:
+		lines.append("части: загружено %d, создаётся %d, последняя за %d мс" % [
+			_streamer.loaded_count(), _streamer.pending_count(), _streamer.last_build_msec,
+		])
 	lines.append("мощность %d кВт     тяга %d Н     расход топлива %s" % [
 		roundi(s.engine_power / 1000.0), roundi(s.thrust), burn_text,
 	])
@@ -472,5 +536,5 @@ func _build_hud_text() -> String:
 	lines.append("левый клик — курс     Q E — курс ±1°     C — сбросить курс")
 	lines.append("правая кнопка — точка (с Ctrl, Alt — перенос на экране)     X — убрать точку     V — режим камеры     H — возврат камеры")
 	lines.append("1 2 3 — зум     стрелки или средняя кнопка — сдвиг камеры     щелчок средней — вернуть камеру")
-	lines.append("[ ] — топливо ±50 кг     T — покрытие     F — расход топлива     R — заново     F2 — скрыть")
+	lines.append("[ ] — топливо ±50 кг     T — местность или плоскость     F — расход топлива     R — заново     F2 — скрыть     F3 — части")
 	return "\n".join(lines)

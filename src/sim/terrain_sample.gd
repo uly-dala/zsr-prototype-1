@@ -12,3 +12,18 @@ var grade_east: float = 0.0
 var grade_north: float = 0.0
 ## Покрытие под машиной.
 var surface: SurfaceParams
+## Ветер на скользком поле: ускорение на восток и на север, м/с².
+## На обычном грунте ноль.
+var wind_east: float = 0.0
+var wind_north: float = 0.0
+
+
+## Слой местности возвращает один и тот же объект на каждый запрос,
+## поэтому тот, кому ответ нужен надолго, копирует его себе.
+func copy_from(other) -> void:
+	height = other.height
+	grade_east = other.grade_east
+	grade_north = other.grade_north
+	surface = other.surface
+	wind_east = other.wind_east
+	wind_north = other.wind_north

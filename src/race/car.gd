@@ -47,11 +47,16 @@ var points_passed: int = 0
 var points_dropped: int = 0
 ## Отклонено команд: точка вне допустимой зоны.
 var points_rejected: int = 0
+## Ударов о препятствия.
+var hits: int = 0
+## Сколько ещё секунд управление заблокировано после удара.
+var blocked_left: float = 0.0
 
 var _input: CarInput = CarInput.new()
 var _throttle_wait: float = 0.0
 var _steer_wait: float = 0.0
-var _last_terrain: TerrainSample = null
+var _last_terrain: TerrainSample = TerrainSample.new()
+var _has_terrain: bool = false
 
 
 func _init(p_id: int, p_params: CarParams) -> void:
@@ -84,7 +89,7 @@ func _apply_point(command: Command) -> void:
 	if not command.active:
 		point_active = false
 		return
-	if _last_terrain != null and not autopilot.point_allowed(
+	if _has_terrain and not autopilot.point_allowed(
 			sim, state, _last_terrain, course_active, deg_to_rad(course_deg), command.a, command.b):
 		points_rejected += 1
 		return
@@ -120,9 +125,22 @@ func point_distance() -> float:
 
 
 func step(terrain: TerrainSample, dt: float) -> void:
-	_last_terrain = terrain
+	_last_terrain.copy_from(terrain)
+	_has_terrain = true
 	if point_active:
 		_check_point(terrain)
+
+	if blocked_left > 0.0:
+		# После удара управление заблокировано: ни игрок, ни автоматика
+		# не рулят и не газуют (раздел 5.4).
+		blocked_left -= dt
+		auto_throttle = false
+		auto_steer = false
+		_input.steer = 0.0
+		_input.throttle = 0.0
+		_input.brake = 0.0
+		sim.step(state, _input, terrain, dt)
+		return
 
 	var throttle: float = 0.0
 	auto_throttle = false
@@ -151,8 +169,75 @@ func step(terrain: TerrainSample, dt: float) -> void:
 		auto_steer = true
 
 	_input.steer = steer
-	_input.throttle = throttle
+	_set_drive(throttle, auto_throttle)
 	sim.step(state, _input, terrain, dt)
+
+
+## Перевести газ и тормоз от -1 до 1 во вход модели.
+## Автоматика: плюс — газ, минус — тормоз; назад она не ездит.
+## Игрок: W и S — газ и тормоз по ходу движения, а с места S включает задний
+## ход. При движении назад наоборот: W тормозит, S газует.
+func _set_drive(value: float, from_autopilot: bool) -> void:
+	_input.throttle = 0.0
+	_input.brake = 0.0
+	if value == 0.0:
+		return
+	var forward: float = state.forward_speed()
+	if from_autopilot:
+		if value > 0.0:
+			if forward < -0.5:
+				_input.brake = 1.0
+			else:
+				_input.throttle = value
+		else:
+			_input.brake = -value
+	elif value > 0.0:
+		if forward < -0.5:
+			_input.brake = value
+		else:
+			_input.throttle = value
+	elif forward > 0.5:
+		_input.brake = -value
+	else:
+		_input.throttle = value
+
+
+## Едет ли машина задним ходом.
+func is_reversing() -> bool:
+	return state.forward_speed() < -0.5
+
+
+## Препятствие сплошное: машина не может оказаться ближе radius к его центру
+## (east, north). Скорость внутрь препятствия гасится, машина выталкивается
+## на границу. Если она входила быстрее collision_hit_speed — это удар:
+## остаётся collision_speed_keep скорости, управление блокируется (раздел 5.4).
+## Упёршись носом, машина стоит, пока игрок не отъедет задним ходом.
+func collide(east: float, north: float, radius: float) -> void:
+	var d_east: float = state.x - east
+	var d_north: float = state.y - north
+	var distance: float = sqrt(d_east * d_east + d_north * d_north)
+	if distance >= radius:
+		return
+	var out_east: float = -sin(state.heading)
+	var out_north: float = -cos(state.heading)
+	if distance > 0.001:
+		out_east = d_east / distance
+		out_north = d_north / distance
+	var closing: float = -(state.vel_east * out_east + state.vel_north * out_north)
+	if closing > 0.0:
+		state.vel_east += out_east * closing
+		state.vel_north += out_north * closing
+	var drift_closing: float = -(state.drift_east * out_east + state.drift_north * out_north)
+	if drift_closing > 0.0:
+		state.drift_east += out_east * drift_closing
+		state.drift_north += out_north * drift_closing
+	if closing + maxf(drift_closing, 0.0) > sim.params.collision_hit_speed:
+		hits += 1
+		blocked_left = sim.params.collision_block_time
+		state.vel_east *= sim.params.collision_speed_keep
+		state.vel_north *= sim.params.collision_speed_keep
+	state.x = east + out_east * radius
+	state.y = north + out_north * radius
 
 
 ## Точка пройдена в радиусе point_pass_radius. Вплотную к точке проверяется

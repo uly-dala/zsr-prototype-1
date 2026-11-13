@@ -11,7 +11,7 @@ const Command = preload("res://src/sim/command.gd")
 const STEPS_PER_SECOND: int = 60
 const DT: float = 1.0 / 60.0
 
-## Слой данных местности: объект с функцией sample(x, y).
+## Слой данных местности: объект с функциями sample(x, y) и obstacle_near(x, y, margin).
 var terrain
 var cars: Array = []
 var step_index: int = 0
@@ -48,6 +48,11 @@ func submit(command: Command) -> void:
 func step() -> void:
 	for car in cars:
 		car.step(terrain.sample(car.state.x, car.state.y), DT)
+		# Препятствия сплошные: после шага машина выталкивается наружу.
+		var margin: float = car.sim.params.collision_margin
+		var obstacle: Vector3 = terrain.obstacle_near(car.state.x, car.state.y, margin)
+		if obstacle.z > 0.0:
+			car.collide(obstacle.x, obstacle.y, obstacle.z + margin)
 	step_index += 1
 
 

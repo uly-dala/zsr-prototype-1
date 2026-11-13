@@ -15,6 +15,10 @@ extends Resource
 @export var max_thrust: float = 8000.0
 ## Расход топлива, кг на 1 Дж работы двигателя (0,05 кг на 1 кДж).
 @export var fuel_per_joule: float = 0.00005
+## Наибольшая скорость заднего хода, м/с (допущение: около 30 км/ч).
+@export var reverse_max_speed: float = 8.0
+## Доля максимальной тяги на заднем ходу (допущение).
+@export var reverse_thrust_share: float = 0.5
 
 @export_group("Шины")
 ## Замедление при торможении с пустым баком, м/с².
@@ -35,6 +39,19 @@ extends Resource
 @export var drag_coefficient: float = 0.6
 ## Ускорение свободного падения, м/с².
 @export var gravity: float = 9.81
+
+@export_group("Снос и удары")
+## После выхода со скользкого поля снос от ветра гаснет за столько секунд (допущение).
+@export var wind_drift_decay: float = 0.5
+## Удар засчитывается, если машина входит в препятствие быстрее, м/с.
+## Медленнее — это касание без штрафа (допущение).
+@export var collision_hit_speed: float = 2.0
+## Доля скорости, которая остаётся после удара о препятствие.
+@export var collision_speed_keep: float = 0.2
+## На сколько секунд удар блокирует управление.
+@export var collision_block_time: float = 1.0
+## Половина ширины машины для проверки удара, м.
+@export var collision_margin: float = 1.0
 
 @export_group("Управление")
 ## Доля доступной боковой силы шин, которую использует автоматика.

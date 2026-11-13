@@ -3,7 +3,7 @@ extends RefCounted
 ## Дизайн-документ, разделы 4 и 9.6.
 ##
 ## Граница модели:
-##   вход  — CarInput (руль, газ и тормоз) и TerrainSample (местность под машиной);
+##   вход  — CarInput (руль, тяга вперёд или назад, тормоз) и TerrainSample (местность под машиной);
 ##   выход — CarState.
 ## Автоматика и ИИ не считают движение сами, а задают модели вопросы
 ## (функции в конце файла).
@@ -59,6 +59,7 @@ func step(state: CarState, input: CarInput, terrain: TerrainSample, dt: float) -
 	var lat_limit: float = tires.lateral_limit(mass, surface)
 	var long_limit: float = tires.longitudinal_limit(mass, surface)
 	var throttle: float = clampf(input.throttle, -1.0, 1.0)
+	var brake: float = clampf(input.brake, 0.0, 1.0)
 
 	# 1. Привод руля.
 	var steer_step: float = params.steer_rate * dt
@@ -83,8 +84,11 @@ func step(state: CarState, input: CarInput, terrain: TerrainSample, dt: float) -
 	var right_n: float = -nose_e
 
 	# 3. Двигатель и уклон.
-	var thrust: float = engine.thrust(throttle, forward, state.fuel)
-	thrust = minf(thrust, mass * long_limit)
+	var thrust: float = 0.0
+	if throttle > 0.0:
+		thrust = minf(engine.thrust(throttle, forward, state.fuel), mass * long_limit)
+	elif throttle < 0.0:
+		thrust = maxf(engine.reverse_thrust(throttle, forward, state.fuel), -mass * long_limit)
 	var thrust_accel: float = thrust / mass
 	state.vel_east += (nose_e * thrust_accel + rolling.slope_accel(terrain.grade_east)) * dt
 	state.vel_north += (nose_n * thrust_accel + rolling.slope_accel(terrain.grade_north)) * dt
@@ -106,21 +110,36 @@ func step(state: CarState, input: CarInput, terrain: TerrainSample, dt: float) -
 		var excess: float = maxf(0.0, (lateral_ratio - share) / maxf(1.0 - share, 0.001))
 		scrub = params.manual_scrub_decel * surface.grip * excess
 		var decel: float = (aero.drag(speed) + rolling.resistance(mass, surface)) / mass + scrub
-		if throttle < 0.0:
-			decel += -throttle * long_limit
+		decel += brake * long_limit
 		var new_speed: float = maxf(0.0, speed - decel * dt)
 		var keep: float = new_speed / speed
 		state.vel_east *= keep
 		state.vel_north *= keep
 		speed = new_speed
 
-	# 6. Положение и одометр.
-	state.x += state.vel_east * dt
-	state.y += state.vel_north * dt
+	# 6. Ветер на скользком покрытии: боковой снос, которому шины не
+	# сопротивляются. Нос остаётся на курсе, а машину уносит вбок (раздел 5.3).
+	var wind_side: float = terrain.wind_east * right_e + terrain.wind_north * right_n
+	if wind_side != 0.0:
+		state.drift_east += right_e * wind_side * dt
+		state.drift_north += right_n * wind_side * dt
+	elif state.drift_east != 0.0 or state.drift_north != 0.0:
+		var drift: float = sqrt(state.drift_east * state.drift_east + state.drift_north * state.drift_north)
+		var fade: float = lat_limit * dt
+		if params.wind_drift_decay > 0.0:
+			fade = maxf(fade, drift * dt / params.wind_drift_decay)
+		var left: float = maxf(0.0, drift - fade) / drift
+		state.drift_east *= left
+		state.drift_north *= left
+
+	# 7. Положение и одометр.
+	state.x += (state.vel_east + state.drift_east) * dt
+	state.y += (state.vel_north + state.drift_north) * dt
 	state.distance += speed * dt
 
-	# 7. Топливо: расход пропорционален работе двигателя.
-	var power: float = thrust * maxf(forward, 0.0)
+	# 8. Топливо: расход пропорционален работе двигателя.
+	# Двигатель работает, когда тяга и движение направлены в одну сторону.
+	var power: float = maxf(thrust * forward, 0.0)
 	if burn_fuel:
 		state.fuel = maxf(0.0, state.fuel - engine.fuel_for_work(power * dt))
 

@@ -15,7 +15,7 @@ const TerrainSample = preload("res://src/sim/terrain_sample.gd")
 const Command = preload("res://src/sim/command.gd")
 
 
-## Газ и тормоз от -1 до 1 для режима mode (Command.TargetMode) и значения value:
+## Газ (плюс) и тормоз (минус) от -1 до 1 для режима mode (Command.TargetMode) и значения value:
 ## скорость в км/ч или расход в кг/мин.
 func throttle(sim: CarSim, state: CarState, terrain: TerrainSample, mode: int, value: float) -> float:
 	var forward: float = state.forward_speed()
@@ -98,7 +98,7 @@ func _hold_speed(sim: CarSim, state: CarState, terrain: TerrainSample, forward: 
 	var target: float = speed_kmh / 3.6
 	if target <= 0.0:
 		# Задан ноль: остановиться и стоять на тормозе.
-		if forward <= 0.05 or long_limit <= 0.0:
+		if absf(forward) <= 0.05 or long_limit <= 0.0:
 			return -1.0
 		return -clampf(params.autopilot_max_brake / long_limit, 0.0, 1.0)
 	var grade: float = terrain.grade_east * sin(state.heading) + terrain.grade_north * cos(state.heading)

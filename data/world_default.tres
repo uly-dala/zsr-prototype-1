@@ -1,0 +1,29 @@
+[gd_resource type="Resource" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://src/world/world_gen_params.gd" id="1_script"]
+
+[resource]
+script = ExtResource("1_script")
+world_seed = 1
+area_min = Vector2(-3000, -500)
+area_max = Vector2(3000, 12500)
+start_clear_radius = 80.0
+height_amplitude = 45.0
+height_period = 1200.0
+max_grade = 0.15
+contour_interval = 5.0
+sand_period = 900.0
+sand_threshold = 0.3
+slick_count = 8
+slick_radius_min = 180.0
+slick_radius_max = 350.0
+wind_min = 0.2
+wind_max = 0.5
+obstacle_density = 227.0
+obstacle_radius_min = 1.5
+obstacle_radius_max = 7.5
+chunk_size = 512.0
+chunk_cells = 128
+load_radius = 1500.0
+unload_radius = 2500.0
+max_jobs = 3

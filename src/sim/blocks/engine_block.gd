@@ -23,6 +23,14 @@ func thrust(throttle: float, forward_speed: float, fuel: float) -> float:
 	return throttle * max_thrust_at(forward_speed)
 
 
+## Тяга заднего хода, Н (отрицательная). throttle от -1 до 0.
+## Задний ход ограничен по скорости и по доле тяги.
+func reverse_thrust(throttle: float, forward_speed: float, fuel: float) -> float:
+	if throttle >= 0.0 or fuel <= 0.0 or forward_speed <= -params.reverse_max_speed:
+		return 0.0
+	return throttle * params.max_thrust * params.reverse_thrust_share
+
+
 ## Топливо на работу двигателя, кг.
 func fuel_for_work(work_joules: float) -> float:
 	return work_joules * params.fuel_per_joule
