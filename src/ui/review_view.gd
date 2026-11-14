@@ -45,10 +45,10 @@ func _draw() -> void:
 	draw_string(font, Vector2(left, y), _title, HORIZONTAL_ALIGNMENT_LEFT, width, 30, Color(1.0, 0.9, 0.5))
 	y += 18.0
 	for line in _lines:
-		y += 27.0
-		draw_string(font, Vector2(left, y), line, HORIZONTAL_ALIGNMENT_LEFT, width, 19, Color(0.95, 0.93, 0.88))
-	y += 34.0
-	var chart_height: float = clampf((size.y - y - 120.0) * 0.5, 80.0, 220.0)
+		y += 21.0
+		draw_string(font, Vector2(left, y), line, HORIZONTAL_ALIGNMENT_LEFT, width, 16, Color(0.95, 0.93, 0.88))
+	y += 30.0
+	var chart_height: float = clampf((size.y - y - 130.0) * 0.5, 60.0, 220.0)
 	_draw_chart(font, Rect2(left, y, width, chart_height), _log.fuel, "топливо, кг", Color(0.4, 0.85, 1.0))
 	y += chart_height + 46.0
 	_draw_chart(font, Rect2(left, y, width, chart_height), _log.speed, "скорость, км/ч", Color(0.6, 1.0, 0.6))

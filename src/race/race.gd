@@ -7,7 +7,7 @@ extends Node2D
 ## при движении к точке, местность из генератора с подгрузкой частями,
 ## покрытия, ветер, препятствия, карта, ориентиры, контрольные точки, линейка,
 ## склады топлива и выбор заправки перед стартом, запись заезда и разбор
-## после финиша.
+## после финиша, девять соперников под управлением ИИ.
 ##
 ## Узел только связывает части между собой:
 ##   ввод игрока -> команды -> RaceSim (фиксированный шаг 60 раз в секунду)
@@ -26,6 +26,8 @@ const MapView = preload("res://src/ui/map_view.gd")
 const ReviewView = preload("res://src/ui/review_view.gd")
 const RaceLog = preload("res://src/race/race_log.gd")
 const ReplayInput = preload("res://src/input/replay_input.gd")
+const AiParams = preload("res://src/input/ai_params.gd")
+const AiInput = preload("res://src/input/ai_input.gd")
 const RaceSim = preload("res://src/race/race_sim.gd")
 const Car = preload("res://src/race/car.gd")
 const Recorder = preload("res://src/race/recorder.gd")
@@ -44,6 +46,10 @@ const Command = preload("res://src/sim/command.gd")
 const CAR_PARAMS_PATH: String = "res://data/car_default.tres"
 const CAMERA_PARAMS_PATH: String = "res://data/camera_default.tres"
 const WORLD_PARAMS_PATH: String = "res://data/world_default.tres"
+const AI_PARAMS_PATH: String = "res://data/ai_default.tres"
+## Соперников каждого типа: спринтер, середняк, экономный (раздел 8).
+const RIVALS_PER_KIND: int = 3
+const RIVAL_COLORS: Array = [Color(0.9, 0.25, 0.25), Color(0.3, 0.55, 0.95), Color(0.35, 0.8, 0.4)]
 const SURFACE_PATHS: Array = [
 	"res://data/surface_hard.tres",
 	"res://data/surface_sand.tres",
@@ -94,6 +100,10 @@ var _race_log: RaceLog = RaceLog.new()
 var _review: ReviewView
 ## Заезд окончен: финиш или пустой бак. Симуляция стоит, открыт разбор.
 var _finished: bool = false
+var _ai_params: AiParams
+## Соперники: источники команд и изображения машин.
+var _rivals: Array = []
+var _rival_views: Array = []
 ## Истинный путь для отладочного показа на карте (F1): восток и север, м.
 var _true_trail: PackedVector2Array = PackedVector2Array()
 var _burn_fuel: bool = true
@@ -192,6 +202,8 @@ func _ready() -> void:
 	# Картинка карты строится один раз в фоне (раздел 9.4).
 	_map_task = WorkerThreadPool.add_task(_build_map_image)
 
+	_ai_params = load(AI_PARAMS_PATH) as AiParams
+	assert(_ai_params != null, "Не загружен файл параметров соперников")
 	_chosen_fuel = world_params.start_fuel_default
 	_apply_terrain_mode()
 	_start_race()
@@ -243,6 +255,7 @@ func _start_race() -> void:
 	if _terrain_mode == 0:
 		fuel = _chosen_fuel
 	_player = _sim.add_car(_car_params, fuel, 0.0, 0.0, 0.0)
+	_add_rivals()
 	# На местности из генератора заезд начинается с экрана выбора заправки.
 	_prestart = _terrain_mode == 0
 	_map.set_open(_prestart)
@@ -264,6 +277,8 @@ func _physics_process(_delta: float) -> void:
 		return
 	for _i in steps_per_tick:
 		_player_input.poll(_sim)
+		for rival in _rivals:
+			rival.decide(_sim, _terrain, _layout.landmarks)
 		_store_previous()
 		_sim.step()
 		_recorder.sample(_sim.step_index, _sim.time_seconds(), _player, _surface_under_player().id, _map.is_open)
@@ -333,6 +348,13 @@ func _process(delta: float) -> void:
 	_map.true_position = Vector2(s.x, s.y)
 	if not _finished:
 		_map.true_trail = _true_trail
+	var rival_positions: PackedVector2Array = PackedVector2Array()
+	for i in _rivals.size():
+		var rival_state = _sim.cars[_rivals[i].car_id].state
+		_rival_views[i].position = Vector2(rival_state.x, -rival_state.y)
+		_rival_views[i].rotation = rival_state.heading
+		rival_positions.append(Vector2(rival_state.x, rival_state.y))
+	_map.rival_positions = rival_positions
 	_map.update_view(viewport_size, delta)
 	if _grid.visible:
 		_grid.visible_rect = _camera.visible_world_rect(car_pos, viewport_size)
@@ -573,6 +595,36 @@ func _on_map_key(pressed: bool) -> void:
 		_map_opened_msec = -1
 
 
+## Девять соперников: по три каждого типа. Стартуют в два ряда рядом
+## с игроком; машины друг с другом не сталкиваются (раздел 8).
+func _add_rivals() -> void:
+	for view in _rival_views:
+		view.queue_free()
+	_rival_views = []
+	_rivals = []
+	if _terrain_mode != 0:
+		return
+	var slot: int = 0
+	for kind in 3:
+		for number in RIVALS_PER_KIND:
+			var column: int = slot % 5
+			var row: int = int(slot / 5.0)
+			var x: float = (column - 2) * 7.0 + (3.5 if row == 1 else 0.0)
+			if row == 0 and column >= 2:
+				# Середина первого ряда занята игроком.
+				x += 7.0
+			var y: float = -9.0 * row
+			var rival: AiInput = AiInput.new(_sim.cars.size(), kind, number + 1, _ai_params, _world_params.world_seed)
+			_sim.add_car(_car_params, rival.start_fuel(), x, y, 0.0)
+			_rivals.append(rival)
+			var view: CarView = CarView.new()
+			view.body_color = RIVAL_COLORS[kind]
+			view.position = Vector2(x, -y)
+			_world.add_child(view)
+			_rival_views.append(view)
+			slot += 1
+
+
 ## Конец заезда: сохранить повтор и открыть разбор (раздел 7.5).
 func _finish_race() -> void:
 	_finished = true
@@ -594,7 +646,12 @@ func _review_lines() -> PackedStringArray:
 	var s = _player.state
 	var race_log: RaceLog = _race_log
 	var lines: PackedStringArray = PackedStringArray()
-	lines.append("время %s     осталось топлива %d кг" % [_clock(_sim.time_seconds()), roundi(s.fuel)])
+	if _sim.cars.size() > 1:
+		lines.append("место %d из %d     время %s     осталось топлива %d кг" % [
+			_sim.place_of(_player.id), _sim.cars.size(), _clock(_sim.time_seconds()), roundi(s.fuel),
+		])
+	else:
+		lines.append("время %s     осталось топлива %d кг" % [_clock(_sim.time_seconds()), roundi(s.fuel)])
 	var total: int = _sim.checkpoints.size()
 	if total > 0:
 		lines.append("контрольных точек взято %d из %d" % [_player.next_checkpoint, total])
@@ -631,6 +688,19 @@ func _review_lines() -> PackedStringArray:
 				roundi(leg["distance"] - straight),
 			])
 			from = _layout.checkpoints[i]
+	# Соперники на момент конца заезда игрока.
+	if not _rivals.is_empty():
+		lines.append("")
+		for rival in _rivals:
+			var car = _sim.cars[rival.car_id]
+			var status: String = "в пути, взято точек %d" % car.next_checkpoint
+			if car.finish_step >= 0:
+				status = "финиш %s" % _clock(car.finish_step * RaceSim.DT)
+			elif car.state.fuel <= 0.0:
+				status = "пустой бак, взято точек %d" % car.next_checkpoint
+			lines.append("%d. %s: %s, заправок %d, ударов %d" % [
+				_sim.place_of(rival.car_id), rival.title, status, car.refuels, car.hits,
+			])
 	if race_log.debug_used:
 		lines.append("")
 		lines.append("в заезде использованы отладочные клавиши")
@@ -780,7 +850,10 @@ func _build_hud_text() -> String:
 				int(finish_seconds / 60.0), finish_seconds % 60, roundi(s.fuel),
 			])
 		else:
-			lines.append("следующая контрольная точка: %d из %d" % [_player.next_checkpoint + 1, total])
+			var place_text: String = ""
+			if _sim.cars.size() > 1:
+				place_text = "     место %d из %d" % [_sim.place_of(_player.id), _sim.cars.size()]
+			lines.append("следующая контрольная точка: %d из %d%s" % [_player.next_checkpoint + 1, total, place_text])
 	# Склад: остаток виден, только когда машина на нём стоит.
 	var depot: int = _sim.world_state.depot_at(s.x, s.y)
 	if depot >= 0:

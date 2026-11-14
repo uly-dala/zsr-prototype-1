@@ -39,6 +39,17 @@ func obstacle_near(x: float, y: float, margin: float) -> Vector3:
 	return Vector3.ZERO
 
 
+## Ближайшее препятствие в полосе перед машиной: см. GeneratedTerrain.
+func obstacle_ahead(x: float, y: float, heading: float, distance: float, half_width: float) -> Vector3:
+	if test_obstacle.z <= 0.0:
+		return Vector3.ZERO
+	var along: float = (test_obstacle.x - x) * sin(heading) + (test_obstacle.y - y) * cos(heading)
+	var across: float = (test_obstacle.x - x) * cos(heading) - (test_obstacle.y - y) * sin(heading)
+	if along > 0.0 and along - test_obstacle.z < distance and absf(across) < test_obstacle.z + half_width:
+		return test_obstacle
+	return Vector3.ZERO
+
+
 ## x — восток, y — север, метры.
 func sample(_x: float, _y: float) -> TerrainSample:
 	return _sample

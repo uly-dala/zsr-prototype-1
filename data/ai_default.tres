@@ -1,0 +1,25 @@
+[gd_resource type="Resource" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://src/input/ai_params.gd" id="1_script"]
+
+[resource]
+script = ExtResource("1_script")
+start_fuel = PackedFloat32Array(300, 500, 500)
+speed_min = PackedFloat32Array(115, 100, 75)
+speed_max = PackedFloat32Array(125, 110, 90)
+drift_rate = 0.03
+error_cap = 150.0
+sight_radius = 250.0
+landmark_fix_radius = 150.0
+notice_probability = 0.6
+early_time = 5.0
+late_time = 2.0
+miss_probability = 0.15
+miss_time = 0.9
+clearance = 6.0
+fuel_margin = 1.15
+terrain_factor = 1.5
+min_refuel_space = 100.0
+saving_speed_min = 50.0
+approach_speed_min = 20.0
+depot_speed = 25.0

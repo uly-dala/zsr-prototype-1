@@ -81,6 +81,28 @@ func _check_checkpoint(car: Car) -> void:
 		car.finish_step = step_index
 
 
+## Место машины в гонке, с единицы. Финишировавшие идут по времени финиша,
+## остальные — по числу взятых точек и расстоянию до следующей.
+func place_of(car_id: int) -> int:
+	var mine: float = _progress(cars[car_id])
+	var place: int = 1
+	for car in cars:
+		if car.id != car_id and _progress(car) > mine:
+			place += 1
+	return place
+
+
+## Чем больше, тем выше место.
+func _progress(car: Car) -> float:
+	if car.finish_step >= 0:
+		return 1000000000.0 - car.finish_step
+	if car.next_checkpoint >= checkpoints.size():
+		return float(car.next_checkpoint) * 100000.0
+	var target: Vector2 = checkpoints[car.next_checkpoint]
+	var left: float = Vector2(car.state.x, car.state.y).distance_to(target)
+	return float(car.next_checkpoint) * 100000.0 - left
+
+
 ## Время заезда, с.
 func time_seconds() -> float:
 	return step_index * DT

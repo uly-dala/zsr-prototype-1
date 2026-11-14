@@ -115,6 +115,41 @@ func obstacle_near(x: float, y: float, margin: float) -> Vector3:
 	return Vector3.ZERO
 
 
+## Ближайшее препятствие в полосе перед машиной: от точки (x, y) по курсу
+## heading (радианы) на distance метров, половина ширины полосы half_width.
+## Возвращает x — восток, y — север, z — радиус; если полоса свободна,
+## радиус равен нулю. Этим запросом пользуется ИИ: он «смотрит вперёд».
+func obstacle_ahead(x: float, y: float, heading: float, distance: float, half_width: float) -> Vector3:
+	var size: float = params.chunk_size
+	var nose_east: float = sin(heading)
+	var nose_north: float = cos(heading)
+	var end_x: float = x + nose_east * distance
+	var end_y: float = y + nose_north * distance
+	var reach: float = params.obstacle_radius_max + half_width
+	var cx_from: int = int(floor((minf(x, end_x) - reach) / size))
+	var cx_to: int = int(floor((maxf(x, end_x) + reach) / size))
+	var cy_from: int = int(floor((minf(y, end_y) - reach) / size))
+	var cy_to: int = int(floor((maxf(y, end_y) + reach) / size))
+	var best: Vector3 = Vector3.ZERO
+	var best_gap: float = distance
+	for cx in range(cx_from, cx_to + 1):
+		for cy in range(cy_from, cy_to + 1):
+			var list: PackedFloat32Array = _cached_obstacles(cx, cy)
+			var index: int = 0
+			while index < list.size():
+				var d_east: float = list[index] - x
+				var d_north: float = list[index + 1] - y
+				var radius: float = list[index + 2]
+				var along: float = d_east * nose_east + d_north * nose_north
+				if along > 0.0 and along - radius < best_gap:
+					var across: float = d_east * nose_north - d_north * nose_east
+					if absf(across) < radius + half_width:
+						best_gap = along - radius
+						best = Vector3(list[index], list[index + 1], radius)
+				index += OBSTACLE_STRIDE
+	return best
+
+
 # --- Чистые функции слоя данных -----------------------------------------------
 
 ## Высота, м.

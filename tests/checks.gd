@@ -1,5 +1,5 @@
 extends RefCounted
-## Автопроверки шагов 0–8. Запускаются без окна: см. run_checks.bat.
+## Автопроверки шагов 0–9. Запускаются без окна: см. run_checks.bat.
 ##
 ## Ожидаемые числа взяты из таблиц дизайн-документа (разделы 3.4, 3.5, 4.2, 6, 7.1)
 ## и из независимого расчёта той же модели.
@@ -22,6 +22,8 @@ const MapBuilder = preload("res://src/world/map_builder.gd")
 const MapView = preload("res://src/ui/map_view.gd")
 const RaceLog = preload("res://src/race/race_log.gd")
 const ReplayInput = preload("res://src/input/replay_input.gd")
+const AiParams = preload("res://src/input/ai_params.gd")
+const AiInput = preload("res://src/input/ai_input.gd")
 
 const DT: float = 1.0 / 60.0
 ## Скорость 108 км/ч в м/с.
@@ -91,6 +93,10 @@ func run() -> void:
 	_test_depots()
 	_section("Запись заезда и повтор (7.5, 9.2)")
 	_test_log_and_replay()
+	_section("Соперники: объезд и задний ход (8)")
+	_test_rival_basics()
+	_section("Соперники: заезд девяти машин по местности (8)")
+	_test_rival_race()
 
 
 # --- Проверки ---------------------------------------------------------------
@@ -854,6 +860,118 @@ func _test_log_and_replay() -> void:
 		_true("отрезок до контрольной точки записан", race_log.legs.size() == 1 and race_log.legs[0]["distance"] > 590.0)
 	else:
 		_true("контрольная точка не взята, отрезков в журнале нет", race_log.legs.is_empty())
+
+
+## Строка в журнал без проверки: числа для настройки.
+func _info(text: String) -> void:
+	lines.append("  ...     %s" % text)
+
+
+## Один соперник на плоскости: точка в 1,5 км на севере и камень на пути.
+func _rival_on_plane(start_y: float, limit: int) -> RaceSim:
+	var ai_params: AiParams = load("res://data/ai_default.tres") as AiParams
+	var terrain: FlatTerrain = FlatTerrain.new(_hard)
+	terrain.test_obstacle = Vector3(0.0, 400.0, 6.0)
+	var race: RaceSim = RaceSim.new(terrain)
+	race.checkpoints = PackedVector2Array([Vector2(0.0, 1500.0)])
+	var rival: AiInput = AiInput.new(0, AiInput.Kind.MIDDLE, 1, ai_params, 1)
+	race.add_car(_params, rival.start_fuel(), 0.0, start_y, 0.0)
+	var count: int = 0
+	while count < limit and race.cars[0].finish_step < 0:
+		rival.decide(race, terrain, [])
+		race.step()
+		count += 1
+	return race
+
+
+func _test_rival_basics() -> void:
+	var ai_params: AiParams = load("res://data/ai_default.tres") as AiParams
+	if ai_params == null:
+		_report(false, "Файл параметров соперников не загрузился")
+		return
+	# С разгона: камень на пути в 400 м.
+	var race: RaceSim = _rival_on_plane(0.0, 9000)
+	var car = race.cars[0]
+	_true("соперник объехал камень и взял точку (за %.0f с, ударов %d)" % [race.time_seconds(), car.hits],
+		car.finish_step >= 0)
+	_true("соперник едет с крейсерской скоростью своего типа", car.target_value >= 0.0 and race.time_seconds() < 90.0)
+	_true("соперник управляет командами: в журнале есть курс и скорость", race.command_log.size() >= 2)
+	# С места вплотную к камню: упирается, отъезжает задним ходом, объезжает.
+	var stuck: RaceSim = _rival_on_plane(392.8, 9000)
+	_true("упёршись в камень, соперник выезжает задним ходом и доезжает (за %.0f с)" % stuck.time_seconds(),
+		stuck.cars[0].finish_step >= 0)
+	# Соперники одного зерна ведут себя одинаково.
+	var again: RaceSim = _rival_on_plane(0.0, 9000)
+	_true("поведение соперника воспроизводимо", again.cars[0].finish_step == car.finish_step
+		and again.cars[0].state.x == car.state.x)
+	# Места в гонке.
+	var places: RaceSim = _new_race(250.0, 0.0)
+	places.add_car(_params, 250.0, 0.0, 100.0, 0.0)
+	places.add_car(_params, 250.0, 0.0, 50.0, 0.0)
+	places.checkpoints = PackedVector2Array([Vector2(0.0, 1000.0), Vector2(0.0, 2000.0)])
+	_true("место по расстоянию до точки", places.place_of(1) == 1 and places.place_of(2) == 2 and places.place_of(0) == 3)
+	places.cars[0].next_checkpoint = 1
+	_true("взятая точка важнее расстояния", places.place_of(0) == 1 and places.place_of(1) == 2)
+	places.cars[2].next_checkpoint = 2
+	places.cars[2].finish_step = 500
+	_true("финишировавший впереди всех", places.place_of(2) == 1 and places.place_of(0) == 2)
+
+
+## Девять соперников на местности из генератора, без игрока, до 15 минут.
+func _test_rival_race() -> void:
+	var world_params: WorldGenParams = load("res://data/world_default.tres") as WorldGenParams
+	var ai_params: AiParams = load("res://data/ai_default.tres") as AiParams
+	var layout: StageLayout = StageLayout.new(world_params)
+	var world: GeneratedTerrain = GeneratedTerrain.new(world_params, _hard, _sand, _slick, layout.clear_zones())
+	var race: RaceSim = RaceSim.new(world)
+	race.checkpoints = layout.checkpoints
+	race.checkpoint_radius = layout.checkpoint_radius
+	race.world_state.setup(layout.depots, world_params.depot_stock, world_params.depot_portion,
+		world_params.depot_radius, world_params.depot_max_speed)
+	var rivals: Array = []
+	for kind in 3:
+		for number in 3:
+			var rival: AiInput = AiInput.new(race.cars.size(), kind, number + 1, ai_params, world_params.world_seed)
+			race.add_car(_params, rival.start_fuel(), (rivals.size() - 4) * 7.0, 0.0, 0.0)
+			rivals.append(rival)
+	var started: int = Time.get_ticks_msec()
+	var running: bool = true
+	while running and race.step_index < 54000:
+		for rival in rivals:
+			rival.decide(race, world, layout.landmarks)
+		race.step()
+		if race.step_index % 600 == 0:
+			# Заезд идёт, пока хоть одна машина ещё может доехать.
+			running = false
+			for car in race.cars:
+				if car.finish_step < 0 and (car.state.fuel > 0.0 or car.state.speed() > 0.5):
+					running = true
+	var finished: int = 0
+	var finished_by_kind: Array = [0, 0, 0]
+	var best: Array = [0.0, 0.0, 0.0]
+	for rival in rivals:
+		var car = race.cars[rival.car_id]
+		var status: String = "не доехал, взято точек %d, топливо %d кг" % [car.next_checkpoint, int(car.state.fuel)]
+		if car.finish_step >= 0:
+			var seconds: float = car.finish_step * DT
+			status = "финиш %d:%02d, топливо %d кг" % [int(seconds / 60.0), int(seconds) % 60, int(car.state.fuel)]
+			finished += 1
+			finished_by_kind[rival.kind] += 1
+			if best[rival.kind] == 0.0 or seconds < best[rival.kind]:
+				best[rival.kind] = seconds
+		_info("%s, %d км/ч: %s, путь %.1f км, заправок %d (%d кг), ударов %d, место %d" % [
+			rival.title, int(rival.cruise_speed), status, car.state.distance / 1000.0, car.refuels,
+			int(car.fuel_taken), car.hits, race.place_of(rival.car_id),
+		])
+	var stock_text: String = ""
+	for value in race.world_state.stock:
+		stock_text += " %d" % int(value)
+	_info("остатки на складах, кг:%s" % stock_text)
+	_info("лучшее время по типам, с: спринтер %d, середняк %d, экономный %d" % [int(best[0]), int(best[1]), int(best[2])])
+	_info("расчёт занял %.1f с, шагов %d" % [(Time.get_ticks_msec() - started) / 1000.0, race.step_index])
+	_true("до финиша доехали не меньше 5 соперников из 9 (доехало %d)" % finished, finished >= 5)
+	_true("доехал хотя бы один соперник каждого типа",
+		finished_by_kind[0] > 0 and finished_by_kind[1] > 0 and finished_by_kind[2] > 0)
 
 
 func _test_map() -> void:

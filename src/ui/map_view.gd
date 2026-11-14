@@ -30,6 +30,8 @@ var review_events: Array = []
 var show_truth: bool = false
 var true_position: Vector2 = Vector2.ZERO
 var true_trail: PackedVector2Array = PackedVector2Array()
+## Истинные положения соперников для отладки (F1) и разбора.
+var rival_positions: PackedVector2Array = PackedVector2Array()
 
 var _canvas: Control
 var _layout = null
@@ -358,3 +360,5 @@ func _draw_truth() -> void:
 			points[i] = to_screen(true_trail[i])
 		_canvas.draw_polyline(points, color, 1.5)
 	_canvas.draw_circle(to_screen(true_position), 4.0, color)
+	for rival in rival_positions:
+		_canvas.draw_circle(to_screen(rival), 3.0, Color(1.0, 1.0, 1.0, 0.9))
