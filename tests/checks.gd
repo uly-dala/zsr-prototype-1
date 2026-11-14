@@ -1,5 +1,5 @@
 extends RefCounted
-## Автопроверки шагов 0–7. Запускаются без окна: см. run_checks.bat.
+## Автопроверки шагов 0–8. Запускаются без окна: см. run_checks.bat.
 ##
 ## Ожидаемые числа взяты из таблиц дизайн-документа (разделы 3.4, 3.5, 4.2, 6, 7.1)
 ## и из независимого расчёта той же модели.
@@ -20,6 +20,8 @@ const GeneratedTerrain = preload("res://src/world/generated_terrain.gd")
 const StageLayout = preload("res://src/world/stage_layout.gd")
 const MapBuilder = preload("res://src/world/map_builder.gd")
 const MapView = preload("res://src/ui/map_view.gd")
+const RaceLog = preload("res://src/race/race_log.gd")
+const ReplayInput = preload("res://src/input/replay_input.gd")
 
 const DT: float = 1.0 / 60.0
 ## Скорость 108 км/ч в м/с.
@@ -87,6 +89,8 @@ func run() -> void:
 	_test_map()
 	_section("Склады топлива (5.5)")
 	_test_depots()
+	_section("Запись заезда и повтор (7.5, 9.2)")
+	_test_log_and_replay()
 
 
 # --- Проверки ---------------------------------------------------------------
@@ -775,6 +779,81 @@ func _test_depots() -> void:
 	rush.submit(Command.new(Command.Type.SET_TARGET, 0, Command.TargetMode.SPEED, 60.0))
 	_steps(rush, 2400)
 	_true("в заезде: проезд склада на 60 км/ч ничего не дал", rush.cars[0].refuels == 0)
+
+
+## Заезд по местности из генератора с объездами: команды по сценарию.
+## Возвращает симуляцию после заезда. При replay != null команды берутся из повтора.
+func _recorded_race(replay: ReplayInput, race_log: RaceLog) -> RaceSim:
+	var race: RaceSim = RaceSim.new(_new_world())
+	race.add_car(_params, 400.0, 0.0, 0.0, 0.0)
+	race.checkpoints = PackedVector2Array([Vector2(60.0, 600.0)])
+	race.world_state.setup(PackedVector2Array([Vector2(60.0, 300.0)]), 600.0, 200.0, 15.0, 30.0)
+	var car = race.cars[0]
+	for i in 3600:
+		if replay != null:
+			replay.feed(race)
+		elif i == 0:
+			race.submit(Command.new(Command.Type.SET_TARGET, 0, Command.TargetMode.SPEED, 25.0))
+			race.submit(Command.new(Command.Type.SET_COURSE, 0, 11.0, 0.0, true))
+		elif i == 300:
+			race.submit(Command.new(Command.Type.MANUAL, 0, 1.0, 0.0))
+		elif i == 330:
+			race.submit(Command.new(Command.Type.MANUAL, 0, 0.0, 0.0))
+		elif i == 600:
+			race.submit(Command.new(Command.Type.SET_POINT, 0, car.state.x + 3.0, car.state.y + 60.0, true))
+		elif i == 1500:
+			race.submit(Command.new(Command.Type.SET_TARGET, 0, Command.TargetMode.CONSUMPTION, 40.0))
+		elif i == 2400:
+			race.submit(Command.new(Command.Type.MANUAL, 0, -0.5, -1.0))
+		elif i == 2460:
+			race.submit(Command.new(Command.Type.MANUAL, 0, 0.0, 0.0))
+		race.step()
+		if race_log != null:
+			race_log.record(race.step_index, race.time_seconds(), car, i >= 900 and i < 1200)
+	return race
+
+
+func _test_log_and_replay() -> void:
+	var race_log: RaceLog = RaceLog.new()
+	var original: RaceSim = _recorded_race(null, race_log)
+	var car = original.cars[0]
+	race_log.close(original.time_seconds(), car)
+	_true("в журнале команд 8 команд", original.command_log.size() == 8)
+
+	# Повтор из журнала команд воспроизводит заезд точно.
+	var replayed: RaceSim = _recorded_race(ReplayInput.new(original.command_log), null)
+	var twin = replayed.cars[0]
+	_true("повтор воспроизводит заезд точно: положение, курс, топливо",
+		twin.state.x == car.state.x and twin.state.y == car.state.y
+		and twin.state.heading == car.state.heading and twin.state.fuel == car.state.fuel)
+	_true("повтор: те же удары, заправки и точки",
+		twin.hits == car.hits and twin.refuels == car.refuels and twin.points_passed == car.points_passed
+		and twin.next_checkpoint == car.next_checkpoint)
+
+	# Повтор переживает запись в файл и чтение обратно.
+	var text: String = JSON.stringify({"commands": ReplayInput.commands_to_data(original.command_log)}, "", false, true)
+	var parsed: Variant = JSON.parse_string(text)
+	var restored: Array = ReplayInput.commands_from_data(parsed["commands"])
+	var from_file: RaceSim = _recorded_race(ReplayInput.new(restored), null)
+	_true("повтор из файла воспроизводит заезд точно",
+		from_file.cars[0].state.x == car.state.x and from_file.cars[0].state.y == car.state.y
+		and from_file.cars[0].state.fuel == car.state.fuel)
+
+	# Журнал для разбора.
+	_true("путь и графики записаны дважды в секунду (%d точек)" % race_log.path.size(),
+		race_log.path.size() == 121 and race_log.times.size() == 121 and race_log.fuel.size() == 121)
+	_near("последняя точка пути — где машина остановилась, м", race_log.path[race_log.path.size() - 1].y, car.state.y, 0.01)
+	_true("объезды на A и D отмечены (%d)" % race_log.count("maneuver"), race_log.count("maneuver") == 2)
+	_true("заправок в журнале столько же, сколько у машины", race_log.count("refuel") == car.refuels)
+	_true("ударов в журнале столько же, сколько у машины", race_log.count("hit") == car.hits)
+	_near("карта была открыта 5 с из 60: доля", race_log.share(race_log.map_steps), 300.0 / 3600.0, 0.0001)
+	_true("карту открывали один раз", race_log.map_opens == 1)
+	_near("режим «держать расход»: доля времени", race_log.share(race_log.consumption_steps), 2100.0 / 3600.0, 0.001)
+	_near("на WASD: доля времени", race_log.share(race_log.manual_steps), 90.0 / 3600.0, 0.001)
+	if car.next_checkpoint == 1:
+		_true("отрезок до контрольной точки записан", race_log.legs.size() == 1 and race_log.legs[0]["distance"] > 590.0)
+	else:
+		_true("контрольная точка не взята, отрезков в журнале нет", race_log.legs.is_empty())
 
 
 func _test_map() -> void:

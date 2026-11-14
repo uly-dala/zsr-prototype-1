@@ -35,6 +35,19 @@ func start() -> void:
 	_file.store_line(HEADER)
 
 
+## Сохранить повтор рядом с записью заезда: зерно, заправка и команды.
+## data — словарь, который можно записать в JSON.
+func save_replay(data: Dictionary) -> String:
+	if path == "":
+		return ""
+	var replay_path: String = path.get_basename() + ".replay.json"
+	var file: FileAccess = FileAccess.open(replay_path, FileAccess.WRITE)
+	if file == null:
+		return ""
+	file.store_string(JSON.stringify(data, "", false, true))
+	return replay_path
+
+
 func stop() -> void:
 	# Файл закрывается, когда на него не остаётся ссылок.
 	_file = null

@@ -6,7 +6,8 @@ extends Node2D
 ## основное направление и указатель курса, точка, зона клика и камера
 ## при движении к точке, местность из генератора с подгрузкой частями,
 ## покрытия, ветер, препятствия, карта, ориентиры, контрольные точки, линейка,
-## склады топлива и выбор заправки перед стартом.
+## склады топлива и выбор заправки перед стартом, запись заезда и разбор
+## после финиша.
 ##
 ## Узел только связывает части между собой:
 ##   ввод игрока -> команды -> RaceSim (фиксированный шаг 60 раз в секунду)
@@ -22,6 +23,9 @@ const StageLayout = preload("res://src/world/stage_layout.gd")
 const MapBuilder = preload("res://src/world/map_builder.gd")
 const StageView = preload("res://src/view/stage_view.gd")
 const MapView = preload("res://src/ui/map_view.gd")
+const ReviewView = preload("res://src/ui/review_view.gd")
+const RaceLog = preload("res://src/race/race_log.gd")
+const ReplayInput = preload("res://src/input/replay_input.gd")
 const RaceSim = preload("res://src/race/race_sim.gd")
 const Car = preload("res://src/race/car.gd")
 const Recorder = preload("res://src/race/recorder.gd")
@@ -86,6 +90,10 @@ var _chosen_fuel: float = 350.0
 ## Сколько секунд ещё показывать строку о заправке и её текст.
 var _notice_left: float = 0.0
 var _notice_text: String = ""
+var _race_log: RaceLog = RaceLog.new()
+var _review: ReviewView
+## Заезд окончен: финиш или пустой бак. Симуляция стоит, открыт разбор.
+var _finished: bool = false
 ## Истинный путь для отладочного показа на карте (F1): восток и север, м.
 var _true_trail: PackedVector2Array = PackedVector2Array()
 var _burn_fuel: bool = true
@@ -174,6 +182,9 @@ func _ready() -> void:
 	_hud = Hud.new()
 	_hud.name = "Hud"
 	layer.add_child(_hud)
+	_review = ReviewView.new()
+	_review.name = "Review"
+	layer.add_child(_review)
 	_map = MapView.new()
 	_map.name = "Map"
 	layer.add_child(_map)
@@ -222,6 +233,11 @@ func _start_race() -> void:
 	_seen_checkpoint = 0
 	_seen_refuels = 0
 	_notice_left = 0.0
+	_race_log = RaceLog.new()
+	_finished = false
+	_review.hide_review()
+	_map.review_mode = false
+	_map.review_events = []
 	_true_trail = PackedVector2Array()
 	var fuel: float = start_fuel
 	if _terrain_mode == 0:
@@ -244,7 +260,7 @@ func _start_race() -> void:
 
 
 func _physics_process(_delta: float) -> void:
-	if _prestart:
+	if _prestart or _finished:
 		return
 	for _i in steps_per_tick:
 		_player_input.poll(_sim)
@@ -255,6 +271,11 @@ func _physics_process(_delta: float) -> void:
 			_trail.add_point(Vector2(_player.state.x, -_player.state.y))
 		if _sim.step_index % 60 == 0:
 			_true_trail.append(Vector2(_player.state.x, _player.state.y))
+		_race_log.record(_sim.step_index, _sim.time_seconds(), _player, _map.is_open)
+		# Заезд окончен на финише или когда машина встала с пустым баком (раздел 2.2).
+		if _player.finish_step >= 0 or (_player.state.fuel <= 0.0 and _player.state.speed() < 0.5):
+			_finish_race()
+			return
 
 
 func _process(delta: float) -> void:
@@ -310,7 +331,8 @@ func _process(delta: float) -> void:
 	if _prestart:
 		_map.banner = _prestart_text()
 	_map.true_position = Vector2(s.x, s.y)
-	_map.true_trail = _true_trail
+	if not _finished:
+		_map.true_trail = _true_trail
 	_map.update_view(viewport_size, delta)
 	if _grid.visible:
 		_grid.visible_rect = _camera.visible_world_rect(car_pos, viewport_size)
@@ -331,7 +353,11 @@ func _process(delta: float) -> void:
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey:
 		var key: InputEventKey = event as InputEventKey
-		if _prestart:
+		if _finished:
+			if key.pressed and not key.echo and (key.physical_keycode == KEY_R
+					or key.physical_keycode == KEY_ENTER or key.physical_keycode == KEY_KP_ENTER):
+				_start_race()
+		elif _prestart:
 			if key.pressed:
 				_on_prestart_key(key.physical_keycode)
 		elif key.physical_keycode == KEY_M:
@@ -400,6 +426,7 @@ func _on_key(keycode: int) -> void:
 		KEY_F:
 			_burn_fuel = not _burn_fuel
 			_player.sim.burn_fuel = _burn_fuel
+			_race_log.debug_used = true
 		KEY_BRACKETLEFT:
 			_change_fuel(-DEBUG_FUEL_STEP)
 		KEY_BRACKETRIGHT:
@@ -525,6 +552,7 @@ func _store_previous() -> void:
 
 ## Отладка: изменить топливо на ходу, чтобы почувствовать массу.
 func _change_fuel(delta_kg: float) -> void:
+	_race_log.debug_used = true
 	_player.state.fuel = clampf(_player.state.fuel + delta_kg, 0.0, _car_params.fuel_capacity)
 	_player.state.mass = _player.sim.total_mass(_player.state.fuel)
 
@@ -543,6 +571,90 @@ func _on_map_key(pressed: bool) -> void:
 		if Time.get_ticks_msec() - _map_opened_msec > 350:
 			_map.set_open(false)
 		_map_opened_msec = -1
+
+
+## Конец заезда: сохранить повтор и открыть разбор (раздел 7.5).
+func _finish_race() -> void:
+	_finished = true
+	_race_log.close(_sim.time_seconds(), _player)
+	_save_replay()
+	_recorder.stop()
+	_map.review_mode = true
+	_map.review_events = _race_log.events
+	_map.true_trail = _race_log.path
+	_map.set_open(true)
+	var title: String = "ТОПЛИВО КОНЧИЛОСЬ"
+	if _player.finish_step >= 0:
+		title = "ФИНИШ"
+	_review.show_review(_race_log, title, _review_lines())
+
+
+## Строки итогов для разбора. Здесь же числа для критериев раздела 10.
+func _review_lines() -> PackedStringArray:
+	var s = _player.state
+	var race_log: RaceLog = _race_log
+	var lines: PackedStringArray = PackedStringArray()
+	lines.append("время %s     осталось топлива %d кг" % [_clock(_sim.time_seconds()), roundi(s.fuel)])
+	var total: int = _sim.checkpoints.size()
+	if total > 0:
+		lines.append("контрольных точек взято %d из %d" % [_player.next_checkpoint, total])
+		var extra: float = s.distance - _layout.route_length
+		if _player.finish_step >= 0:
+			lines.append("проехано %.2f км при маршруте %.2f км: лишних %.2f км" % [
+				s.distance / 1000.0, _layout.route_length / 1000.0, extra / 1000.0,
+			])
+		else:
+			lines.append("проехано %.2f км из %.2f км маршрута" % [s.distance / 1000.0, _layout.route_length / 1000.0])
+	lines.append("заправка на старте %d кг     взято на складах %d кг за %d раз" % [
+		roundi(_chosen_fuel), roundi(_player.fuel_taken), _player.refuels,
+	])
+	lines.append("ударов %d     объездов на A и D %d     точек пройдено %d, снято %d" % [
+		_player.hits, race_log.count("maneuver"), _player.points_passed, _player.points_dropped,
+	])
+	lines.append("на WASD %d %% времени     карта: %d раз, %d %% времени" % [
+		roundi(race_log.share(race_log.manual_steps) * 100.0), race_log.map_opens,
+		roundi(race_log.share(race_log.map_steps) * 100.0),
+	])
+	lines.append("режимы: скорость %d %%, расход %d %% времени" % [
+		roundi((1.0 - race_log.share(race_log.consumption_steps)) * 100.0),
+		roundi(race_log.share(race_log.consumption_steps) * 100.0),
+	])
+	# По отрезкам: где ушло время и где набежал лишний путь.
+	if total > 0 and not race_log.legs.is_empty():
+		lines.append("")
+		var from: Vector2 = _layout.start
+		for i in race_log.legs.size():
+			var straight: float = from.distance_to(_layout.checkpoints[i])
+			var leg: Dictionary = race_log.legs[i]
+			lines.append("отрезок %d: %s, проехано %.2f км при прямой %.2f км (+%d м)" % [
+				i + 1, _clock(leg["time"]), leg["distance"] / 1000.0, straight / 1000.0,
+				roundi(leg["distance"] - straight),
+			])
+			from = _layout.checkpoints[i]
+	if race_log.debug_used:
+		lines.append("")
+		lines.append("в заезде использованы отладочные клавиши")
+	return lines
+
+
+func _clock(seconds: float) -> String:
+	var whole: int = int(seconds)
+	return "%d:%02d" % [int(whole / 60.0), whole % 60]
+
+
+## Повтор: зерно, заправка и команды с номерами шагов (раздел 9.2).
+func _save_replay() -> void:
+	var s = _player.state
+	_recorder.save_replay({
+		"version": 1,
+		"world_seed": _world_params.world_seed,
+		"terrain_mode": _terrain_mode,
+		"start_fuel": _chosen_fuel if _terrain_mode == 0 else start_fuel,
+		"steps": _sim.step_index,
+		"debug_used": _race_log.debug_used,
+		"commands": ReplayInput.commands_to_data(_sim.command_log),
+		"final": {"x": s.x, "y": s.y, "fuel": s.fuel, "heading": s.heading},
+	})
 
 
 ## Экран перед стартом: стрелки вверх и вниз меняют заправку, Enter или

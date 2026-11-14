@@ -21,6 +21,11 @@ const HERE_TIME: float = 5.0
 var is_open: bool = false
 ## Строка поверх карты: экран перед стартом пишет сюда выбор заправки.
 var banner: String = ""
+## Разбор после финиша: карта стоит слева и показывает путь и события.
+var review_mode: bool = false
+## События заезда для разбора: словари с ключами kind, x, y
+## (kind: "maneuver", "hit", "refuel", "checkpoint").
+var review_events: Array = []
 ## Отладка (F1): показывать истинное положение и путь.
 var show_truth: bool = false
 var true_position: Vector2 = Vector2.ZERO
@@ -100,6 +105,8 @@ func update_view(viewport_size: Vector2, delta: float) -> void:
 		return
 	size = viewport_size * SCREEN_SHARE
 	position = (viewport_size - size) * 0.5
+	if review_mode:
+		position.x = viewport_size.x * 0.01
 	if not _fitted and size.x > 0.0:
 		_fit()
 	_canvas.queue_redraw()
@@ -194,15 +201,24 @@ func _draw_map() -> void:
 	_draw_checkpoints(font)
 	_draw_ruler(font)
 	_draw_here(font)
-	if show_truth:
+	if show_truth or review_mode:
 		_draw_truth()
+	if review_mode:
+		_draw_review_events()
 	if banner != "":
 		_canvas.draw_rect(Rect2(0.0, 0.0, size.x, 44.0), Color(0.0, 0.0, 0.0, 0.7))
 		_canvas.draw_string(font, Vector2(14.0, 30.0), banner, HORIZONTAL_ALIGNMENT_LEFT, -1.0, 20, Color(1.0, 0.92, 0.6))
 	_canvas.draw_rect(Rect2(Vector2.ZERO, size), Color(0.9, 0.85, 0.7, 0.8), false, 2.0)
 	_canvas.draw_string(font, Vector2(14.0, size.y - 14.0),
-		"левая кнопка — двигать     колесо — масштаб     правая кнопка — линейка     сетка %d м" % int(_grid_step),
+		_legend_text(),
 		HORIZONTAL_ALIGNMENT_LEFT, -1.0, 16, Color(1.0, 1.0, 1.0, 0.75))
+
+
+func _legend_text() -> String:
+	var text: String = "левая кнопка — двигать     колесо — масштаб     правая кнопка — линейка     сетка %d м" % int(_grid_step)
+	if review_mode:
+		text += "     путь — розовая линия     удар — крестик     заправка — синий круг     объезд — кольцо"
+	return text
 
 
 func _draw_grid() -> void:
@@ -316,6 +332,21 @@ func _draw_here(font: Font) -> void:
 	_canvas.draw_circle(center, 5.0, color)
 	_canvas.draw_arc(center, 10.0 + 6.0 * pulse, 0.0, TAU, 24, color, 2.0)
 	_canvas.draw_string(font, center + Vector2(18.0, -10.0), "вы здесь", HORIZONTAL_ALIGNMENT_LEFT, -1.0, 18, color)
+
+
+## Места манёвров, ударов и заправок на истинном пути.
+func _draw_review_events() -> void:
+	for event in review_events:
+		var center: Vector2 = to_screen(Vector2(event["x"], event["y"]))
+		if event["kind"] == "hit":
+			var color: Color = Color(1.0, 0.25, 0.2)
+			_canvas.draw_line(center + Vector2(-6.0, -6.0), center + Vector2(6.0, 6.0), color, 2.5)
+			_canvas.draw_line(center + Vector2(-6.0, 6.0), center + Vector2(6.0, -6.0), color, 2.5)
+		elif event["kind"] == "refuel":
+			_canvas.draw_circle(center, 6.0, Color(0.35, 0.6, 1.0))
+			_canvas.draw_arc(center, 6.0, 0.0, TAU, 16, Color(1.0, 1.0, 1.0), 1.5)
+		elif event["kind"] == "maneuver":
+			_canvas.draw_arc(center, 4.0, 0.0, TAU, 12, Color(1.0, 0.65, 0.2), 1.5)
 
 
 func _draw_truth() -> void:
