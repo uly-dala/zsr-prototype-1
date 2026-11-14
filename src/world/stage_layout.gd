@@ -20,6 +20,9 @@ var checkpoint_radius: float = 40.0
 var route_length: float = 0.0
 ## Ориентиры: словари с ключами kind, name, x, y, size, angle.
 var landmarks: Array = []
+## Склады топлива: x — восток, y — север.
+var depots: PackedVector2Array = PackedVector2Array()
+var depot_radius: float = 15.0
 
 var _start_clear: float = 80.0
 
@@ -30,6 +33,7 @@ func _init(params: WorldGenParams) -> void:
 	var rng: RandomNumberGenerator = RandomNumberGenerator.new()
 	rng.seed = hash(Vector2i(params.world_seed, 4242))
 	_place_checkpoints(params, rng)
+	_place_depots(params, rng)
 	_place_landmarks(params, rng)
 
 
@@ -61,6 +65,43 @@ func _place_checkpoints(params: WorldGenParams, rng: RandomNumberGenerator) -> v
 		side = -side
 
 
+## Насколько путь from -> via -> to длиннее прямого from -> to, м.
+static func detour_length(from: Vector2, via: Vector2, to: Vector2) -> float:
+	return from.distance_to(via) + via.distance_to(to) - from.distance_to(to)
+
+
+## Склады лежат в стороне от прямых между контрольными точками (раздел 5.5):
+## по одному на отрезок, крюк от depot_detour_min до depot_detour_max.
+func _place_depots(params: WorldGenParams, rng: RandomNumberGenerator) -> void:
+	depot_radius = params.depot_radius
+	var from: Vector2 = start
+	for i in mini(params.depot_count, checkpoints.size()):
+		var to: Vector2 = checkpoints[i]
+		var along: float = rng.randf_range(0.35, 0.65)
+		var detour: float = rng.randf_range(params.depot_detour_min, params.depot_detour_max)
+		var side: float = 1.0
+		if rng.randf() < 0.5:
+			side = -1.0
+		var base: Vector2 = from.lerp(to, along)
+		var normal: Vector2 = (to - from).normalized().orthogonal()
+		# Смещение от отрезка подбирается делением пополам под нужный крюк.
+		var low: float = 0.0
+		var high: float = 3000.0
+		for step in 30:
+			var middle: float = (low + high) * 0.5
+			if detour_length(from, base + normal * middle, to) < detour:
+				low = middle
+			else:
+				high = middle
+		var spot: Vector2 = base + normal * low * side
+		var edge: float = 200.0
+		if spot.x < params.area_min.x + edge or spot.x > params.area_max.x - edge \
+				or spot.y < params.area_min.y + edge or spot.y > params.area_max.y - edge:
+			spot = base - normal * low * side
+		depots.append(spot)
+		from = to
+
+
 func _place_landmarks(params: WorldGenParams, rng: RandomNumberGenerator) -> void:
 	var numbers: Array = [0, 0, 0, 0, 0, 0]
 	var edge: float = 200.0
@@ -75,6 +116,9 @@ func _place_landmarks(params: WorldGenParams, rng: RandomNumberGenerator) -> voi
 		var is_free: bool = true
 		for checkpoint in checkpoints:
 			if spot.distance_to(checkpoint) < checkpoint_radius + 150.0:
+				is_free = false
+		for depot in depots:
+			if spot.distance_to(depot) < 200.0:
 				is_free = false
 		for other in landmarks:
 			if spot.distance_to(Vector2(other["x"], other["y"])) < params.landmark_spacing:
@@ -102,4 +146,6 @@ func clear_zones() -> PackedVector3Array:
 		zones.append(Vector3(checkpoint.x, checkpoint.y, checkpoint_radius + 10.0))
 	for landmark in landmarks:
 		zones.append(Vector3(landmark["x"], landmark["y"], landmark["size"] * 1.6 + 15.0))
+	for depot in depots:
+		zones.append(Vector3(depot.x, depot.y, depot_radius + 25.0))
 	return zones

@@ -1,5 +1,5 @@
 extends RefCounted
-## Автопроверки шагов 0–6. Запускаются без окна: см. run_checks.bat.
+## Автопроверки шагов 0–7. Запускаются без окна: см. run_checks.bat.
 ##
 ## Ожидаемые числа взяты из таблиц дизайн-документа (разделы 3.4, 3.5, 4.2, 6, 7.1)
 ## и из независимого расчёта той же модели.
@@ -85,6 +85,8 @@ func run() -> void:
 	_test_stage()
 	_section("Карта и линейка (7.2, 9.4)")
 	_test_map()
+	_section("Склады топлива (5.5)")
+	_test_depots()
 
 
 # --- Проверки ---------------------------------------------------------------
@@ -708,6 +710,71 @@ func _test_stage() -> void:
 	_true("последняя точка — финиш", car.next_checkpoint == 3 and car.finish_step == race.step_index - 1)
 	race.step()
 	_true("после финиша счёт точек не меняется", car.next_checkpoint == 3 and car.checkpoint_steps.size() == 3)
+
+
+func _test_depots() -> void:
+	var world_params: WorldGenParams = load("res://data/world_default.tres") as WorldGenParams
+	var layout: StageLayout = StageLayout.new(world_params)
+	_true("складов четыре, по одному на отрезок", layout.depots.size() == 4)
+	var detours_ok: bool = true
+	var from: Vector2 = layout.start
+	var report: String = ""
+	for i in layout.depots.size():
+		var detour: float = StageLayout.detour_length(from, layout.depots[i], layout.checkpoints[i])
+		report += " %d" % int(detour)
+		if detour < world_params.depot_detour_min - 5.0 or detour > world_params.depot_detour_max + 5.0:
+			detours_ok = false
+		if layout.depots[i].x < world_params.area_min.x or layout.depots[i].x > world_params.area_max.x:
+			detours_ok = false
+		from = layout.checkpoints[i]
+	_true("крюк до каждого склада от 300 до 900 м:%s" % report, detours_ok)
+	var world: GeneratedTerrain = GeneratedTerrain.new(world_params, _hard, _sand, _slick, layout.clear_zones())
+	var clear_ok: bool = true
+	for depot in layout.depots:
+		if world.field_at(depot.x, depot.y) >= 0 or world.obstacle_near(depot.x, depot.y, 10.0).z > 0.0:
+			clear_ok = false
+	_true("на складах нет препятствий и скользких полей", clear_ok)
+
+	# Один склад на плоскости, четыре машины.
+	var race: RaceSim = RaceSim.new(FlatTerrain.new(_hard))
+	for i in 4:
+		race.add_car(_params, 250.0, 0.0, 0.0, 0.0)
+	race.world_state.setup(PackedVector2Array([Vector2(0.0, 500.0)]), 600.0, 200.0, 15.0, 30.0)
+	var fast = race.cars[0]
+	fast.state.y = 495.0
+	fast.state.set_motion(0.0, 20.0)
+	_near("быстрее 30 км/ч топливо не взять, кг", race.world_state.try_refuel(fast), 0.0, 0.0)
+	fast.state.set_motion(0.0, 8.0)
+	_near("медленнее 30 км/ч: порция 200 кг", race.world_state.try_refuel(fast), 200.0, 0.001)
+	_true("топливо в баке, склад уменьшился", fast.state.fuel == 450.0 and race.world_state.stock[0] == 400.0 and fast.refuels == 1)
+	_near("с одного склада — один раз, кг", race.world_state.try_refuel(fast), 0.0, 0.0)
+	var nearly_full = race.cars[1]
+	nearly_full.state.fuel = 450.0
+	nearly_full.state.y = 510.0
+	_near("не больше свободного места в баке, кг", race.world_state.try_refuel(nearly_full), 50.0, 0.001)
+	var outside = race.cars[2]
+	outside.state.y = 520.0
+	_near("вне круга склада топливо не взять, кг", race.world_state.try_refuel(outside), 0.0, 0.0)
+	outside.state.y = 500.0
+	_near("третья машина: 200 кг", race.world_state.try_refuel(outside), 200.0, 0.001)
+	var late = race.cars[3]
+	late.state.y = 500.0
+	_near("четвёртой достаётся остаток, кг", race.world_state.try_refuel(late), 150.0, 0.001)
+	_near("склад пуст, кг", race.world_state.stock[0], 0.0, 0.001)
+	_true("номер склада под машиной", race.world_state.depot_at(0.0, 505.0) == 0 and race.world_state.depot_at(0.0, 530.0) == -1)
+
+	# Заправка в заезде: машина проезжает склад на 25 км/ч.
+	var drive: RaceSim = _new_race(100.0, 0.0)
+	drive.world_state.setup(PackedVector2Array([Vector2(0.0, 150.0)]), 600.0, 200.0, 15.0, 30.0)
+	drive.submit(Command.new(Command.Type.SET_TARGET, 0, Command.TargetMode.SPEED, 25.0))
+	_steps(drive, 2400)
+	var driver = drive.cars[0]
+	_true("в заезде: проезд склада на 25 км/ч заправил машину", driver.refuels == 1 and driver.fuel_taken == 200.0 and driver.state.fuel > 250.0)
+	var rush: RaceSim = _new_race(100.0, 0.0)
+	rush.world_state.setup(PackedVector2Array([Vector2(0.0, 300.0)]), 600.0, 200.0, 15.0, 30.0)
+	rush.submit(Command.new(Command.Type.SET_TARGET, 0, Command.TargetMode.SPEED, 60.0))
+	_steps(rush, 2400)
+	_true("в заезде: проезд склада на 60 км/ч ничего не дал", rush.cars[0].refuels == 0)
 
 
 func _test_map() -> void:

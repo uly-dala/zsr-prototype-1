@@ -53,6 +53,11 @@ var next_checkpoint: int = 0
 var checkpoint_steps: PackedInt32Array = PackedInt32Array()
 ## Шаг финиша или -1.
 var finish_step: int = -1
+## Сколько раз машина заправилась на складах и сколько топлива взяла, кг.
+var refuels: int = 0
+var fuel_taken: float = 0.0
+## Склады, на которых машина уже брала топливо: номер склада -> true.
+var depots_used: Dictionary = {}
 ## Ударов о препятствия.
 var hits: int = 0
 ## Сколько ещё секунд управление заблокировано после удара.

@@ -29,6 +29,29 @@ extends Resource
 ## Радиус контрольной точки, м.
 @export var checkpoint_radius: float = 40.0
 
+@export_group("Заправка на старте")
+## Выбор топлива на старте: от, до и шаг, кг.
+@export var start_fuel_min: float = 200.0
+@export var start_fuel_max: float = 500.0
+@export var start_fuel_step: float = 50.0
+## Значение, с которого начинается выбор, кг.
+@export var start_fuel_default: float = 350.0
+
+@export_group("Склады топлива")
+## Складов на этапе: по одному на отрезок маршрута.
+@export var depot_count: int = 4
+## Запас одного склада, кг. Общий для всех машин и конечный.
+@export var depot_stock: float = 600.0
+## Сколько машина забирает за раз, кг.
+@export var depot_portion: float = 200.0
+## Радиус склада, м (допущение, в документе не задан).
+@export var depot_radius: float = 15.0
+## Забрать топливо можно, проезжая медленнее этой скорости, км/ч.
+@export var depot_max_speed: float = 30.0
+## Крюк до склада: насколько путь через склад длиннее прямого отрезка, м.
+@export var depot_detour_min: float = 300.0
+@export var depot_detour_max: float = 900.0
+
 @export_group("Ориентиры")
 ## Сколько ориентиров на местности.
 @export var landmark_count: int = 22

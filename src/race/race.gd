@@ -5,7 +5,8 @@ extends Node2D
 ## силы и масса, камера, удержание скорости и расхода, экран заезда,
 ## основное направление и указатель курса, точка, зона клика и камера
 ## при движении к точке, местность из генератора с подгрузкой частями,
-## покрытия, ветер, препятствия, карта, ориентиры, контрольные точки, линейка.
+## покрытия, ветер, препятствия, карта, ориентиры, контрольные точки, линейка,
+## склады топлива и выбор заправки перед стартом.
 ##
 ## Узел только связывает части между собой:
 ##   ввод игрока -> команды -> RaceSim (фиксированный шаг 60 раз в секунду)
@@ -77,6 +78,14 @@ var _map_image: Image = null
 var _map_mutex: Mutex = Mutex.new()
 var _map_opened_msec: int = -1
 var _seen_checkpoint: int = 0
+var _seen_refuels: int = 0
+## Экран перед стартом (раздел 2.2): открыта карта, игрок выбирает заправку,
+## симуляция стоит.
+var _prestart: bool = false
+var _chosen_fuel: float = 350.0
+## Сколько секунд ещё показывать строку о заправке и её текст.
+var _notice_left: float = 0.0
+var _notice_text: String = ""
 ## Истинный путь для отладочного показа на карте (F1): восток и север, м.
 var _true_trail: PackedVector2Array = PackedVector2Array()
 var _burn_fuel: bool = true
@@ -172,6 +181,7 @@ func _ready() -> void:
 	# Картинка карты строится один раз в фоне (раздел 9.4).
 	_map_task = WorkerThreadPool.add_task(_build_map_image)
 
+	_chosen_fuel = world_params.start_fuel_default
 	_apply_terrain_mode()
 	_start_race()
 
@@ -210,8 +220,16 @@ func _start_race() -> void:
 	_sim = RaceSim.new(_terrain)
 	_apply_stage()
 	_seen_checkpoint = 0
+	_seen_refuels = 0
+	_notice_left = 0.0
 	_true_trail = PackedVector2Array()
-	_player = _sim.add_car(_car_params, start_fuel, 0.0, 0.0, 0.0)
+	var fuel: float = start_fuel
+	if _terrain_mode == 0:
+		fuel = _chosen_fuel
+	_player = _sim.add_car(_car_params, fuel, 0.0, 0.0, 0.0)
+	# На местности из генератора заезд начинается с экрана выбора заправки.
+	_prestart = _terrain_mode == 0
+	_map.set_open(_prestart)
 	_player.sim.burn_fuel = _burn_fuel
 	_player_input = PlayerInput.new(_player.id)
 	_odometer_zero = 0.0
@@ -226,6 +244,8 @@ func _start_race() -> void:
 
 
 func _physics_process(_delta: float) -> void:
+	if _prestart:
+		return
 	for _i in steps_per_tick:
 		_player_input.poll(_sim)
 		_store_previous()
@@ -249,7 +269,8 @@ func _process(delta: float) -> void:
 		shift.x += 1.0
 	if Input.is_physical_key_pressed(KEY_RIGHT):
 		shift.x -= 1.0
-	if shift != Vector2.ZERO:
+	# Перед стартом стрелки выбирают заправку, а не двигают камеру.
+	if shift != Vector2.ZERO and not _prestart:
 		_camera.shift(shift * _camera.params.arrow_shift_rate * delta)
 	_camera.update(delta)
 
@@ -278,6 +299,16 @@ func _process(delta: float) -> void:
 			_map.flash_here(_sim.checkpoints[_player.next_checkpoint - 1])
 		_seen_checkpoint = _player.next_checkpoint
 		_stage_view.set_next_checkpoint(_seen_checkpoint)
+	if _player.refuels != _seen_refuels:
+		_seen_refuels = _player.refuels
+		_notice_text = "ЗАПРАВКА: в баке %d кг" % roundi(s.fuel)
+		_notice_left = 4.0
+		_beeper.beep()
+	if _notice_left > 0.0:
+		_notice_left = maxf(0.0, _notice_left - delta)
+	_map.banner = ""
+	if _prestart:
+		_map.banner = _prestart_text()
 	_map.true_position = Vector2(s.x, s.y)
 	_map.true_trail = _true_trail
 	_map.update_view(viewport_size, delta)
@@ -300,7 +331,10 @@ func _process(delta: float) -> void:
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey:
 		var key: InputEventKey = event as InputEventKey
-		if key.physical_keycode == KEY_M:
+		if _prestart:
+			if key.pressed:
+				_on_prestart_key(key.physical_keycode)
+		elif key.physical_keycode == KEY_M:
 			if not key.echo:
 				_on_map_key(key.pressed)
 		elif key.pressed and key.physical_keycode == KEY_Q:
@@ -356,8 +390,7 @@ func _on_key(keycode: int) -> void:
 		KEY_T:
 			_terrain_mode = (_terrain_mode + 1) % 4
 			_apply_terrain_mode()
-			_sim.terrain = _terrain
-			_apply_stage()
+			_start_race()
 		KEY_F1:
 			_map.show_truth = not _map.show_truth
 		KEY_F3:
@@ -512,14 +545,52 @@ func _on_map_key(pressed: bool) -> void:
 		_map_opened_msec = -1
 
 
-## Контрольные точки и ориентиры есть только на местности из генератора.
+## Экран перед стартом: стрелки вверх и вниз меняют заправку, Enter или
+## пробел начинают заезд.
+func _on_prestart_key(keycode: int) -> void:
+	var params: WorldGenParams = _world_params
+	match keycode:
+		KEY_UP, KEY_RIGHT:
+			_set_start_fuel(_chosen_fuel + params.start_fuel_step)
+		KEY_DOWN, KEY_LEFT:
+			_set_start_fuel(_chosen_fuel - params.start_fuel_step)
+		KEY_ENTER, KEY_KP_ENTER, KEY_SPACE:
+			_prestart = false
+			_map.set_open(false)
+		KEY_T:
+			_terrain_mode = (_terrain_mode + 1) % 4
+			_apply_terrain_mode()
+			_start_race()
+
+
+func _set_start_fuel(fuel: float) -> void:
+	_chosen_fuel = clampf(fuel, _world_params.start_fuel_min, _world_params.start_fuel_max)
+	_player.state.fuel = _chosen_fuel
+	_player.state.mass = _player.sim.total_mass(_chosen_fuel)
+
+
+## Строка экрана перед стартом: заправка и что она значит в километрах.
+func _prestart_text() -> String:
+	var sim = _player.sim
+	var reach_slow: float = sim.range_at_speed(90.0 / 3.6, _chosen_fuel, _surfaces[0]) / 1000.0
+	var reach_fast: float = sim.range_at_speed(108.0 / 3.6, _chosen_fuel, _surfaces[0]) / 1000.0
+	return "Заправка %d кг (стрелки вверх и вниз)     хватит на %.1f км при 90 км/ч, %.1f км при 108     маршрут %.0f км     Enter — старт" % [
+		roundi(_chosen_fuel), reach_slow, reach_fast, _layout.route_length / 1000.0,
+	]
+
+
+## Контрольные точки, склады и ориентиры есть только на местности из генератора.
 func _apply_stage() -> void:
+	var params: WorldGenParams = _world_params
 	if _terrain_mode == 0:
 		_sim.checkpoints = _layout.checkpoints
 		_sim.checkpoint_radius = _layout.checkpoint_radius
+		_sim.world_state.setup(_layout.depots, params.depot_stock, params.depot_portion,
+			params.depot_radius, params.depot_max_speed)
 		_stage_view.set_layout(_layout)
 	else:
 		_sim.checkpoints = PackedVector2Array()
+		_sim.world_state.setup(PackedVector2Array(), 0.0, 0.0, params.depot_radius, params.depot_max_speed)
 		_stage_view.set_layout(null)
 	_stage_view.set_next_checkpoint(0)
 
@@ -598,6 +669,17 @@ func _build_hud_text() -> String:
 			])
 		else:
 			lines.append("следующая контрольная точка: %d из %d" % [_player.next_checkpoint + 1, total])
+	# Склад: остаток виден, только когда машина на нём стоит.
+	var depot: int = _sim.world_state.depot_at(s.x, s.y)
+	if depot >= 0:
+		var depot_note: String = "сбросьте скорость ниже %d км/ч" % roundi(_world_params.depot_max_speed)
+		if _player.depots_used.has(depot):
+			depot_note = "порция уже взята"
+		elif _sim.world_state.stock[depot] <= 0.0:
+			depot_note = "склад пуст"
+		lines.append("СКЛАД %d: осталось %d кг — %s" % [depot + 1, roundi(_sim.world_state.stock[depot]), depot_note])
+	if _notice_left > 0.0:
+		lines.append(_notice_text)
 	var course_note: String = "не задан"
 	if _player.course_active:
 		course_note = "задан %d°" % roundi(_player.course_deg)

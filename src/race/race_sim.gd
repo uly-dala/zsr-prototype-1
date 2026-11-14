@@ -6,6 +6,7 @@ extends RefCounted
 const CarParams = preload("res://src/sim/car_params.gd")
 const Car = preload("res://src/race/car.gd")
 const Command = preload("res://src/sim/command.gd")
+const WorldState = preload("res://src/race/world_state.gd")
 
 ## Шагов симуляции в секунду (раздел 9.1).
 const STEPS_PER_SECOND: int = 60
@@ -21,6 +22,9 @@ var command_log: Array = []
 var checkpoints: PackedVector2Array = PackedVector2Array()
 ## Радиус контрольной точки, м.
 var checkpoint_radius: float = 40.0
+## Склады топлива и их остатки (раздел 5.5). Остатки — изменяемое состояние
+## мира: оно хранится здесь, отдельно от местности и частей.
+var world_state: WorldState = WorldState.new()
 
 
 func _init(p_terrain) -> void:
@@ -58,6 +62,7 @@ func step() -> void:
 		if obstacle.z > 0.0:
 			car.collide(obstacle.x, obstacle.y, obstacle.z + margin)
 		_check_checkpoint(car)
+		world_state.try_refuel(car)
 	step_index += 1
 
 

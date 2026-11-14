@@ -29,6 +29,14 @@ func _draw() -> void:
 	for landmark in _layout.landmarks:
 		# Мир: y — север; экран Godot: y — вниз.
 		LandmarkArt.draw(self, landmark["kind"], Vector2(landmark["x"], -landmark["y"]), landmark["size"], landmark["angle"])
+	# Склады топлива: круг, в котором идёт заправка, и бочки.
+	var depot_color: Color = Color(0.35, 0.75, 1.0)
+	for depot in _layout.depots:
+		var spot: Vector2 = Vector2(depot.x, -depot.y)
+		draw_arc(spot, _layout.depot_radius, 0.0, TAU, 48, depot_color, 1.0)
+		draw_circle(spot + Vector2(-3.0, -2.0), 2.5, depot_color)
+		draw_circle(spot + Vector2(3.0, -2.0), 2.5, depot_color)
+		draw_circle(spot + Vector2(0.0, 3.0), 2.5, depot_color)
 	var font: Font = ThemeDB.fallback_font
 	var radius: float = _layout.checkpoint_radius
 	for i in _layout.checkpoints.size():

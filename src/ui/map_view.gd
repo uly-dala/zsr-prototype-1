@@ -19,6 +19,8 @@ const ZOOM_STEP: float = 1.25
 const HERE_TIME: float = 5.0
 
 var is_open: bool = false
+## Строка поверх карты: экран перед стартом пишет сюда выбор заправки.
+var banner: String = ""
 ## Отладка (F1): показывать истинное положение и путь.
 var show_truth: bool = false
 var true_position: Vector2 = Vector2.ZERO
@@ -188,11 +190,15 @@ func _draw_map() -> void:
 	_draw_grid()
 	_draw_wind(font)
 	_draw_landmarks(font)
+	_draw_depots(font)
 	_draw_checkpoints(font)
 	_draw_ruler(font)
 	_draw_here(font)
 	if show_truth:
 		_draw_truth()
+	if banner != "":
+		_canvas.draw_rect(Rect2(0.0, 0.0, size.x, 44.0), Color(0.0, 0.0, 0.0, 0.7))
+		_canvas.draw_string(font, Vector2(14.0, 30.0), banner, HORIZONTAL_ALIGNMENT_LEFT, -1.0, 20, Color(1.0, 0.92, 0.6))
 	_canvas.draw_rect(Rect2(Vector2.ZERO, size), Color(0.9, 0.85, 0.7, 0.8), false, 2.0)
 	_canvas.draw_string(font, Vector2(14.0, size.y - 14.0),
 		"левая кнопка — двигать     колесо — масштаб     правая кнопка — линейка     сетка %d м" % int(_grid_step),
@@ -253,6 +259,18 @@ func _draw_landmarks(font: Font) -> void:
 		LandmarkArt.draw(_canvas, landmark["kind"], center, icon_size, landmark["angle"])
 		_canvas.draw_string(font, center + Vector2(icon_size + 4.0, 5.0), landmark["name"],
 			HORIZONTAL_ALIGNMENT_LEFT, -1.0, 13, Color(1.0, 1.0, 1.0, 0.85))
+
+
+## Склады отмечены на карте; остаток на них карта не показывает.
+func _draw_depots(font: Font) -> void:
+	if _layout == null:
+		return
+	var color: Color = Color(0.35, 0.75, 1.0)
+	for i in _layout.depots.size():
+		var center: Vector2 = to_screen(_layout.depots[i])
+		_canvas.draw_rect(Rect2(center - Vector2(5.0, 5.0), Vector2(10.0, 10.0)), color)
+		_canvas.draw_rect(Rect2(center - Vector2(5.0, 5.0), Vector2(10.0, 10.0)), Color(0.0, 0.1, 0.2), false, 1.5)
+		_canvas.draw_string(font, center + Vector2(9.0, 5.0), "Склад %d" % (i + 1), HORIZONTAL_ALIGNMENT_LEFT, -1.0, 15, color)
 
 
 func _draw_checkpoints(font: Font) -> void:
