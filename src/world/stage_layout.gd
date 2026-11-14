@@ -24,6 +24,31 @@ var landmarks: Array = []
 var depots: PackedVector2Array = PackedVector2Array()
 var depot_radius: float = 15.0
 
+## Участок трассы с границами (раздел 2.1): прямой коридор между двумя стенами.
+var has_track: bool = false
+var track_start: Vector2 = Vector2.ZERO
+var track_end: Vector2 = Vector2.ZERO
+var track_half_width: float = 20.0
+## Стены трассы: пары точек «начало, конец».
+var walls: PackedVector2Array = PackedVector2Array()
+## Ворота трассы по порядку: вход, промежуточные, выход.
+var gates: PackedVector2Array = PackedVector2Array()
+## Препятствия на трассе: по четыре числа — восток, север, радиус, вид.
+var track_obstacles: PackedFloat32Array = PackedFloat32Array()
+
+## Всё, что машина должна пройти по порядку: контрольные точки и ворота
+## трассы между ними. Эти списки получает симуляция.
+var waypoints: PackedVector2Array = PackedVector2Array()
+var waypoint_radii: PackedFloat32Array = PackedFloat32Array()
+## Подписи для экрана: «контрольная точка 2», «ворота трассы 1 из 4».
+var waypoint_labels: PackedStringArray = PackedStringArray()
+## Номер контрольной точки для каждого места в списке, с нуля; у ворот -1.
+var waypoint_checkpoint: PackedInt32Array = PackedInt32Array()
+## Склад, который лежит на пути к этому месту, или -1.
+var leg_depots: PackedInt32Array = PackedInt32Array()
+
+var _track_leg: int = -1
+
 var _start_clear: float = 80.0
 
 
@@ -33,8 +58,10 @@ func _init(params: WorldGenParams) -> void:
 	var rng: RandomNumberGenerator = RandomNumberGenerator.new()
 	rng.seed = hash(Vector2i(params.world_seed, 4242))
 	_place_checkpoints(params, rng)
+	_place_track(params)
 	_place_depots(params, rng)
 	_place_landmarks(params, rng)
+	_build_waypoints()
 
 
 ## Маршрут идёт в основном на север; отрезки отклоняются то в одну, то в
@@ -65,6 +92,107 @@ func _place_checkpoints(params: WorldGenParams, rng: RandomNumberGenerator) -> v
 		side = -side
 
 
+## Трасса: прямой коридор вдоль отрезка маршрута, две сплошные стены,
+## ворота через равные промежутки и свои препятствия.
+func _place_track(params: WorldGenParams) -> void:
+	# Свои случайные числа: трасса не меняет остальную расстановку.
+	var rng: RandomNumberGenerator = RandomNumberGenerator.new()
+	rng.seed = hash(Vector2i(params.world_seed, 7107))
+	_track_leg = params.track_leg
+	if _track_leg < 0 or _track_leg >= checkpoints.size():
+		return
+	var from: Vector2 = start
+	if _track_leg > 0:
+		from = checkpoints[_track_leg - 1]
+	var to: Vector2 = checkpoints[_track_leg]
+	var leg_length: float = from.distance_to(to)
+	var length: float = minf(params.track_length, leg_length - params.track_offset - 600.0)
+	if length < 300.0:
+		return
+	has_track = true
+	track_half_width = params.track_width * 0.5
+	var direction: Vector2 = (to - from).normalized()
+	var side: Vector2 = direction.orthogonal()
+	track_start = from + direction * params.track_offset
+	track_end = track_start + direction * length
+	walls.append(track_start + side * track_half_width)
+	walls.append(track_end + side * track_half_width)
+	walls.append(track_start - side * track_half_width)
+	walls.append(track_end - side * track_half_width)
+	# Ворота: вход, через каждые track_gate_spacing и выход.
+	var gate_count: int = maxi(1, int(round(length / params.track_gate_spacing)))
+	for i in gate_count + 1:
+		gates.append(track_start + direction * (length * i / gate_count))
+	# Препятствия: одно на track_obstacle_spacing метров, не у самых стен
+	# и не в воротах.
+	var obstacle_count: int = int(floor(length / params.track_obstacle_spacing))
+	for i in obstacle_count:
+		var along: float = (i + 0.5) * params.track_obstacle_spacing + rng.randf_range(-30.0, 30.0)
+		var across: float = rng.randf_range(-0.5, 0.5) * track_half_width
+		var radius: float = rng.randf_range(1.5, 3.0)
+		var spot: Vector2 = track_start + direction * along + side * across
+		var in_gate: bool = false
+		for gate in gates:
+			if spot.distance_to(gate) < track_half_width + radius:
+				in_gate = true
+		if in_gate:
+			continue
+		track_obstacles.append(spot.x)
+		track_obstacles.append(spot.y)
+		track_obstacles.append(radius)
+		track_obstacles.append(0.0)
+
+
+## Расстояние от места до оси трассы, м.
+func _distance_to_track(spot: Vector2) -> float:
+	var axis: Vector2 = track_end - track_start
+	var along: float = clampf((spot - track_start).dot(axis) / axis.length_squared(), 0.0, 1.0)
+	return spot.distance_to(track_start + axis * along)
+
+
+## Список всего, что проходится по порядку: перед контрольной точкой отрезка
+## с трассой стоят её ворота.
+func _build_waypoints() -> void:
+	for i in checkpoints.size():
+		if has_track and i == _track_leg:
+			for g in gates.size():
+				waypoints.append(gates[g])
+				waypoint_radii.append(track_half_width)
+				waypoint_labels.append("ворота трассы %d из %d" % [g + 1, gates.size()])
+				waypoint_checkpoint.append(-1)
+				leg_depots.append(-1)
+		waypoints.append(checkpoints[i])
+		waypoint_radii.append(checkpoint_radius)
+		if i == checkpoints.size() - 1:
+			waypoint_labels.append("контрольная точка %d, финиш" % (i + 1))
+		else:
+			waypoint_labels.append("контрольная точка %d" % (i + 1))
+		waypoint_checkpoint.append(i)
+		if i < depots.size():
+			leg_depots.append(i)
+		else:
+			leg_depots.append(-1)
+
+
+## Передать симуляции всё, что проходится по порядку, и стены трассы.
+## sim — RaceSim.
+func apply_to(sim) -> void:
+	sim.checkpoints = waypoints
+	sim.checkpoint_radius = checkpoint_radius
+	sim.checkpoint_radii = waypoint_radii
+	sim.leg_depots = leg_depots
+	sim.walls = walls
+
+
+## Сколько контрольных точек (без ворот) среди первых count мест списка.
+func checkpoints_among(count: int) -> int:
+	var total: int = 0
+	for i in mini(count, waypoint_checkpoint.size()):
+		if waypoint_checkpoint[i] >= 0:
+			total += 1
+	return total
+
+
 ## Насколько путь from -> via -> to длиннее прямого from -> to, м.
 static func detour_length(from: Vector2, via: Vector2, to: Vector2) -> float:
 	return from.distance_to(via) + via.distance_to(to) - from.distance_to(to)
@@ -78,6 +206,12 @@ func _place_depots(params: WorldGenParams, rng: RandomNumberGenerator) -> void:
 	for i in mini(params.depot_count, checkpoints.size()):
 		var to: Vector2 = checkpoints[i]
 		var along: float = rng.randf_range(0.35, 0.65)
+		if has_track and i == _track_leg:
+			# На отрезке с трассой склад стоит после её выхода.
+			var after_track: float = (from.distance_to(track_end) + 300.0) / from.distance_to(to)
+			# Случайное число то же, что без трассы: остальные склады и ориентиры
+			# от появления трассы не сдвигаются.
+			along = lerpf(minf(after_track, 0.85), 0.9, (along - 0.35) / 0.3)
 		var detour: float = rng.randf_range(params.depot_detour_min, params.depot_detour_max)
 		var side: float = 1.0
 		if rng.randf() < 0.5:
@@ -120,6 +254,8 @@ func _place_landmarks(params: WorldGenParams, rng: RandomNumberGenerator) -> voi
 		for depot in depots:
 			if spot.distance_to(depot) < 200.0:
 				is_free = false
+		if has_track and _distance_to_track(spot) < track_half_width + 150.0:
+			is_free = false
 		for other in landmarks:
 			if spot.distance_to(Vector2(other["x"], other["y"])) < params.landmark_spacing:
 				is_free = false
@@ -148,4 +284,12 @@ func clear_zones() -> PackedVector3Array:
 		zones.append(Vector3(landmark["x"], landmark["y"], landmark["size"] * 1.6 + 15.0))
 	for depot in depots:
 		zones.append(Vector3(depot.x, depot.y, depot_radius + 25.0))
+	if has_track:
+		# Трасса и полоса вокруг стен: случайных препятствий и скользких полей
+		# здесь нет, на трассе стоят свои препятствия.
+		var length: float = track_start.distance_to(track_end)
+		var steps: int = int(ceil(length / 40.0))
+		for i in steps + 1:
+			var spot: Vector2 = track_start.lerp(track_end, float(i) / steps)
+			zones.append(Vector3(spot.x, spot.y, track_half_width + 30.0))
 	return zones

@@ -11,7 +11,7 @@ extends Resource
 ## Северо-восточный угол. Короткий формат: 6 × 13 км.
 @export var area_max: Vector2 = Vector2(3000.0, 12500.0)
 ## Вокруг старта нет препятствий и скользких полей, м.
-@export var start_clear_radius: float = 80.0
+@export var start_clear_radius: float = 150.0
 
 @export_group("Маршрут")
 ## Контрольных точек на этапе; последняя — финиш.
@@ -29,6 +29,22 @@ extends Resource
 ## Радиус контрольной точки, м.
 @export var checkpoint_radius: float = 40.0
 
+@export_group("Участок трассы с границами")
+## На каком отрезке маршрута лежит трасса: 1 — от первой контрольной точки
+## ко второй. Отрицательное число — трассы нет.
+@export var track_leg: int = 1
+## Длина трассы, м.
+@export var track_length: float = 1500.0
+## Ширина трассы между стенами, м.
+@export var track_width: float = 40.0
+## Трасса начинается через столько метров после контрольной точки.
+@export var track_offset: float = 250.0
+## На трассе одно препятствие на столько метров пути.
+@export var track_obstacle_spacing: float = 150.0
+## Ворота внутри трассы стоят через столько метров. Их нужно пройти по
+## порядку, поэтому трассу нельзя объехать снаружи.
+@export var track_gate_spacing: float = 500.0
+
 @export_group("Заправка на старте")
 ## Выбор топлива на старте: от, до и шаг, кг.
 @export var start_fuel_min: float = 200.0
@@ -41,9 +57,9 @@ extends Resource
 ## Складов на этапе: по одному на отрезок маршрута.
 @export var depot_count: int = 4
 ## Запас одного склада, кг. Общий для всех машин и конечный.
-@export var depot_stock: float = 600.0
+@export var depot_stock: float = 900.0
 ## Сколько машина забирает за раз, кг.
-@export var depot_portion: float = 200.0
+@export var depot_portion: float = 300.0
 ## Радиус склада, м (допущение, в документе не задан).
 @export var depot_radius: float = 15.0
 ## Забрать топливо можно, проезжая медленнее этой скорости, км/ч.
@@ -68,7 +84,7 @@ extends Resource
 
 @export_group("Рельеф")
 ## Размах высот: высота меняется от -amplitude до +amplitude, м.
-@export var height_amplitude: float = 45.0
+@export var height_amplitude: float = 30.0
 ## Характерный размер холма, м.
 @export var height_period: float = 1200.0
 ## Наибольший уклон: 0,15 — это 15 %.

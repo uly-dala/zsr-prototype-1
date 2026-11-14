@@ -91,6 +91,8 @@ func run() -> void:
 	_test_map()
 	_section("Склады топлива (5.5)")
 	_test_depots()
+	_section("Участок трассы с границами (2.1)")
+	_test_track()
 	_section("Запись заезда и повтор (7.5, 9.2)")
 	_test_log_and_replay()
 	_section("Соперники: объезд и задний ход (8)")
@@ -924,8 +926,8 @@ func _test_rival_race() -> void:
 	var layout: StageLayout = StageLayout.new(world_params)
 	var world: GeneratedTerrain = GeneratedTerrain.new(world_params, _hard, _sand, _slick, layout.clear_zones())
 	var race: RaceSim = RaceSim.new(world)
-	race.checkpoints = layout.checkpoints
-	race.checkpoint_radius = layout.checkpoint_radius
+	world.set_extra_obstacles(layout.track_obstacles)
+	layout.apply_to(race)
 	race.world_state.setup(layout.depots, world_params.depot_stock, world_params.depot_portion,
 		world_params.depot_radius, world_params.depot_max_speed)
 	var rivals: Array = []
@@ -951,7 +953,11 @@ func _test_rival_race() -> void:
 	var best: Array = [0.0, 0.0, 0.0]
 	for rival in rivals:
 		var car = race.cars[rival.car_id]
-		var status: String = "не доехал, взято точек %d, топливо %d кг" % [car.next_checkpoint, int(car.state.fuel)]
+		var status: String = "не доехал, взято точек %d, топливо %d кг" % [
+			layout.checkpoints_among(car.next_checkpoint), int(car.state.fuel),
+		]
+		if car.finish_step < 0 and car.next_checkpoint < layout.waypoints.size():
+			status += ", ехал к месту «%s»" % layout.waypoint_labels[car.next_checkpoint]
 		if car.finish_step >= 0:
 			var seconds: float = car.finish_step * DT
 			status = "финиш %d:%02d, топливо %d кг" % [int(seconds / 60.0), int(seconds) % 60, int(car.state.fuel)]
@@ -972,6 +978,98 @@ func _test_rival_race() -> void:
 	_true("до финиша доехали не меньше 5 соперников из 9 (доехало %d)" % finished, finished >= 5)
 	_true("доехал хотя бы один соперник каждого типа",
 		finished_by_kind[0] > 0 and finished_by_kind[1] > 0 and finished_by_kind[2] > 0)
+
+
+func _test_track() -> void:
+	var world_params: WorldGenParams = load("res://data/world_default.tres") as WorldGenParams
+	var layout: StageLayout = StageLayout.new(world_params)
+	_true("трасса есть", layout.has_track)
+	if not layout.has_track:
+		return
+	_near("длина трассы, м", layout.track_start.distance_to(layout.track_end), world_params.track_length, 1.0)
+	_near("ширина трассы, м", layout.walls[0].distance_to(layout.walls[2]), world_params.track_width, 0.1)
+	_true("стен две, ворот четыре (%d)" % layout.gates.size(), layout.walls.size() == 4 and layout.gates.size() == 4)
+	_true("в списке четыре контрольные точки и четыре пары ворот",
+		layout.waypoints.size() == 8 and layout.checkpoints_among(8) == 4)
+	# Порядок: точка 1, ворота, точка 2, 3, 4.
+	var order_ok: bool = layout.waypoint_checkpoint[0] == 0 and layout.waypoint_checkpoint[5] == 1
+	for place in range(1, 5):
+		if layout.waypoint_checkpoint[place] != -1 or layout.waypoints[place] != layout.gates[place - 1]:
+			order_ok = false
+		if absf(layout.waypoint_radii[place] - world_params.track_width * 0.5) > 0.01:
+			order_ok = false
+	_true("ворота стоят в списке между первой и второй точками", order_ok)
+	_true("склад второго отрезка — после выхода с трассы",
+		layout.leg_depots[1] == -1 and layout.leg_depots[4] == -1 and layout.leg_depots[5] == 1
+		and layout.depots[1].distance_to(layout.checkpoints[0]) > layout.track_end.distance_to(layout.checkpoints[0]))
+	var twin: StageLayout = StageLayout.new(world_params)
+	_true("трасса воспроизводима", twin.walls == layout.walls and twin.track_obstacles == layout.track_obstacles)
+
+	# Препятствия на трассе: около одного на 150 м, все внутри стен.
+	var world: GeneratedTerrain = GeneratedTerrain.new(world_params, _hard, _sand, _slick, layout.clear_zones())
+	world.set_extra_obstacles(layout.track_obstacles)
+	var count: int = int(layout.track_obstacles.size() / 4.0)
+	_true("препятствий на трассе от 6 до 10 (%d)" % count, count >= 6 and count <= 10)
+	var axis: Vector2 = (layout.track_end - layout.track_start).normalized()
+	var inside_ok: bool = true
+	var found_ok: bool = true
+	for i in count:
+		var spot: Vector2 = Vector2(layout.track_obstacles[i * 4], layout.track_obstacles[i * 4 + 1])
+		var offset: Vector2 = spot - layout.track_start
+		if absf(offset.dot(axis.orthogonal())) + layout.track_obstacles[i * 4 + 2] > layout.track_half_width - 5.0:
+			inside_ok = false
+		if world.obstacle_near(spot.x, spot.y, 1.0).z <= 0.0:
+			found_ok = false
+	_true("препятствия трассы стоят не ближе 5 м к стенам", inside_ok)
+	_true("симуляция видит препятствия трассы", found_ok)
+	# Случайных препятствий на трассе нет: всё найденное на оси — из списка трассы.
+	var foreign: int = 0
+	for step in 151:
+		var probe: Vector2 = layout.track_start.lerp(layout.track_end, step / 150.0)
+		var seen: Vector3 = world.obstacle_near(probe.x, probe.y, layout.track_half_width)
+		if seen.z > 0.0:
+			var known: bool = false
+			for i in count:
+				if absf(layout.track_obstacles[i * 4] - seen.x) < 0.01 and absf(layout.track_obstacles[i * 4 + 1] - seen.y) < 0.01:
+					known = true
+			if not known:
+				foreign += 1
+	_true("случайных препятствий на трассе нет (%d)" % foreign, foreign == 0)
+
+	# Стена сплошная: машина на 60 км/ч в неё упирается.
+	var race: RaceSim = RaceSim.new(FlatTerrain.new(_hard))
+	var car = race.add_car(_params, 250.0, 0.0, 0.0, 0.0)
+	race.walls = PackedVector2Array([Vector2(-200.0, 200.0), Vector2(200.0, 200.0)])
+	race.submit(Command.new(Command.Type.SET_TARGET, 0, Command.TargetMode.SPEED, 60.0))
+	for step in 1800:
+		race.step()
+	_true("стена не пропускает машину (север %.1f м, ударов %d)" % [car.state.y, car.hits],
+		car.state.y < 200.0 and car.state.y > 190.0 and car.hits >= 1)
+	# Вдоль стены под малым углом: скольжение без удара.
+	var slide: RaceSim = RaceSim.new(FlatTerrain.new(_hard))
+	var slider = slide.add_car(_params, 250.0, 0.0, 0.0, deg_to_rad(88.0))
+	slide.walls = PackedVector2Array([Vector2(-200.0, 10.0), Vector2(3000.0, 10.0)])
+	slide.submit(Command.new(Command.Type.SET_TARGET, 0, Command.TargetMode.SPEED, 60.0))
+	for step in 1800:
+		slide.step()
+	_true("касание стены под углом 2° — без удара (восток %.0f м, ударов %d)" % [slider.state.x, slider.hits],
+		slider.hits == 0 and slider.state.x > 300.0 and slider.state.y < 10.0)
+
+	# Ворота уже контрольной точки: свой радиус.
+	var gates: RaceSim = RaceSim.new(FlatTerrain.new(_hard))
+	var runner = gates.add_car(_params, 250.0, 0.0, 0.0, 0.0)
+	gates.checkpoints = PackedVector2Array([Vector2(0.0, 300.0), Vector2(0.0, 600.0)])
+	gates.checkpoint_radius = 40.0
+	gates.checkpoint_radii = PackedFloat32Array([20.0, 40.0])
+	gates.leg_depots = PackedInt32Array([-1, 0])
+	runner.state.x = 30.0
+	runner.state.y = 300.0
+	gates.step()
+	_true("в 30 м от ворот — не засчитано", runner.next_checkpoint == 0)
+	runner.state.x = 15.0
+	gates.step()
+	_true("в 15 м от ворот — засчитано", runner.next_checkpoint == 1)
+	_true("склад привязан к отрезку после ворот", gates.depot_of_leg(0) == -1 and gates.depot_of_leg(1) == 0)
 
 
 func _test_map() -> void:

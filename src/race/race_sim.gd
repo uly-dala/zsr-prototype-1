@@ -22,6 +22,14 @@ var command_log: Array = []
 var checkpoints: PackedVector2Array = PackedVector2Array()
 ## Радиус контрольной точки, м.
 var checkpoint_radius: float = 40.0
+## Свой радиус для каждого места списка (ворота трассы уже контрольных точек).
+## Если список пуст, у всех checkpoint_radius.
+var checkpoint_radii: PackedFloat32Array = PackedFloat32Array()
+## Склад на пути к каждому месту списка или -1. Если список пуст, склад
+## с тем же номером, что и место.
+var leg_depots: PackedInt32Array = PackedInt32Array()
+## Сплошные стены: пары точек «начало, конец» (участок трассы с границами).
+var walls: PackedVector2Array = PackedVector2Array()
 ## Склады топлива и их остатки (раздел 5.5). Остатки — изменяемое состояние
 ## мира: оно хранится здесь, отдельно от местности и частей.
 var world_state: WorldState = WorldState.new()
@@ -61,9 +69,38 @@ func step() -> void:
 		var obstacle: Vector3 = terrain.obstacle_near(car.state.x, car.state.y, margin)
 		if obstacle.z > 0.0:
 			car.collide(obstacle.x, obstacle.y, obstacle.z + margin)
+		_collide_walls(car, margin)
 		_check_checkpoint(car)
 		world_state.try_refuel(car)
 	step_index += 1
+
+
+## Склад, который лежит на пути к месту списка с номером leg, или -1.
+func depot_of_leg(leg: int) -> int:
+	if leg < 0:
+		return -1
+	if not leg_depots.is_empty():
+		if leg < leg_depots.size():
+			return leg_depots[leg]
+		return -1
+	if leg < world_state.depots.size():
+		return leg
+	return -1
+
+
+## Стены сплошные: машина не подходит к стене ближе margin. Ближайшая точка
+## стены работает как препятствие радиусом margin.
+func _collide_walls(car: Car, margin: float) -> void:
+	var index: int = 0
+	while index + 1 < walls.size():
+		var from: Vector2 = walls[index]
+		var axis: Vector2 = walls[index + 1] - from
+		var spot: Vector2 = Vector2(car.state.x, car.state.y)
+		var along: float = clampf((spot - from).dot(axis) / axis.length_squared(), 0.0, 1.0)
+		var nearest: Vector2 = from + axis * along
+		if spot.distance_squared_to(nearest) < margin * margin:
+			car.collide(nearest.x, nearest.y, margin)
+		index += 2
 
 
 ## Точки проходятся по порядку: пропущенная не засчитывается, нужно вернуться.
@@ -73,7 +110,10 @@ func _check_checkpoint(car: Car) -> void:
 	var target: Vector2 = checkpoints[car.next_checkpoint]
 	var d_east: float = car.state.x - target.x
 	var d_north: float = car.state.y - target.y
-	if d_east * d_east + d_north * d_north > checkpoint_radius * checkpoint_radius:
+	var radius: float = checkpoint_radius
+	if car.next_checkpoint < checkpoint_radii.size():
+		radius = checkpoint_radii[car.next_checkpoint]
+	if d_east * d_east + d_north * d_north > radius * radius:
 		return
 	car.checkpoint_steps.append(step_index)
 	car.next_checkpoint += 1

@@ -298,6 +298,18 @@ func _draw_checkpoints(font: Font) -> void:
 	var start: Vector2 = to_screen(_layout.start)
 	_canvas.draw_circle(start, 5.0, color)
 	_canvas.draw_string(font, start + Vector2(9.0, 5.0), "Старт", HORIZONTAL_ALIGNMENT_LEFT, -1.0, 16, color)
+	if _layout.has_track:
+		# Трасса: две стены, подпись и ворота на входе и выходе.
+		var track_color: Color = Color(0.95, 0.95, 0.9)
+		var index: int = 0
+		while index + 1 < _layout.walls.size():
+			_canvas.draw_line(to_screen(_layout.walls[index]), to_screen(_layout.walls[index + 1]), track_color, 1.5)
+			index += 2
+		var across: Vector2 = (_layout.track_end - _layout.track_start).normalized().orthogonal() * _layout.track_half_width
+		for gate in _layout.gates:
+			_canvas.draw_line(to_screen(gate + across), to_screen(gate - across), color, 2.0)
+		var middle: Vector2 = to_screen((_layout.track_start + _layout.track_end) * 0.5)
+		_canvas.draw_string(font, middle + Vector2(10.0, 5.0), "Трасса", HORIZONTAL_ALIGNMENT_LEFT, -1.0, 15, track_color)
 	for i in _layout.checkpoints.size():
 		var center: Vector2 = to_screen(_layout.checkpoints[i])
 		var radius: float = maxf(_layout.checkpoint_radius * _scale, 6.0)

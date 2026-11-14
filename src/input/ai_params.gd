@@ -7,6 +7,8 @@ extends Resource
 ## Крейсерская скорость, км/ч: от и до для каждого типа.
 @export var speed_min: PackedFloat32Array = PackedFloat32Array([115.0, 100.0, 75.0])
 @export var speed_max: PackedFloat32Array = PackedFloat32Array([125.0, 110.0, 90.0])
+## Сколько заправок планирует каждый тип (раздел 8): две, одна, ни одной.
+@export var max_refuels: PackedInt32Array = PackedInt32Array([2, 1, 0])
 
 @export_group("Счисление")
 ## Ошибка знания своего положения растёт на столько метров за метр пути.
@@ -20,13 +22,13 @@ extends Resource
 
 @export_group("Препятствия")
 ## Вероятность заметить препятствие заранее и объехать его точкой.
-@export var notice_probability: float = 0.6
+@export var notice_probability: float = 0.85
 ## За сколько секунд пути ИИ ставит точку, если заметил заранее.
 @export var early_time: float = 5.0
 ## За сколько секунд пути ИИ перехватывает руль, если заметил поздно.
 @export var late_time: float = 2.0
 ## Вероятность прозевать препятствие: перехват слишком поздний.
-@export var miss_probability: float = 0.15
+@export var miss_probability: float = 0.05
 ## За сколько секунд пути перехватывает руль прозевавший.
 @export var miss_time: float = 0.9
 ## Запас сбоку от препятствия при объезде точкой, м.
@@ -44,5 +46,12 @@ extends Resource
 @export var saving_speed_min: float = 50.0
 ## Наименьшая скорость на подходе к цели, км/ч.
 @export var approach_speed_min: float = 20.0
+## Наибольшая скорость на участке трассы с границами, км/ч.
+@export var track_speed: float = 80.0
+## Скорость захода на вход трассы, когда машина стоит к нему боком, км/ч.
+@export var track_entry_speed: float = 60.0
+## За сколько метров до входа на оси трассы лежит место, куда ИИ уезжает,
+## чтобы зайти на вход ровно.
+@export var track_entry_distance: float = 600.0
 ## Скорость проезда склада, км/ч.
 @export var depot_speed: float = 25.0

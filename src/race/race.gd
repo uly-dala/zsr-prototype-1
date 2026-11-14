@@ -156,6 +156,7 @@ func _ready() -> void:
 	_world_params = world_params
 	_layout = StageLayout.new(world_params)
 	_generated = GeneratedTerrain.new(world_params, _surfaces[0], _surfaces[1], _surfaces[2], _layout.clear_zones())
+	_generated.set_extra_obstacles(_layout.track_obstacles)
 	_flat = FlatTerrain.new(_surfaces[0])
 
 	_world = Node2D.new()
@@ -654,7 +655,9 @@ func _review_lines() -> PackedStringArray:
 		lines.append("время %s     осталось топлива %d кг" % [_clock(_sim.time_seconds()), roundi(s.fuel)])
 	var total: int = _sim.checkpoints.size()
 	if total > 0:
-		lines.append("контрольных точек взято %d из %d" % [_player.next_checkpoint, total])
+		lines.append("контрольных точек взято %d из %d" % [
+			_layout.checkpoints_among(_player.next_checkpoint), _layout.checkpoints.size(),
+		])
 		var extra: float = s.distance - _layout.route_length
 		if _player.finish_step >= 0:
 			lines.append("проехано %.2f км при маршруте %.2f км: лишних %.2f км" % [
@@ -680,24 +683,25 @@ func _review_lines() -> PackedStringArray:
 	if total > 0 and not race_log.legs.is_empty():
 		lines.append("")
 		var from: Vector2 = _layout.start
-		for i in race_log.legs.size():
-			var straight: float = from.distance_to(_layout.checkpoints[i])
+		for i in mini(race_log.legs.size(), _layout.waypoints.size()):
+			var straight: float = from.distance_to(_layout.waypoints[i])
 			var leg: Dictionary = race_log.legs[i]
-			lines.append("отрезок %d: %s, проехано %.2f км при прямой %.2f км (+%d м)" % [
-				i + 1, _clock(leg["time"]), leg["distance"] / 1000.0, straight / 1000.0,
+			lines.append("до места «%s»: %s, проехано %.2f км при прямой %.2f км (+%d м)" % [
+				_layout.waypoint_labels[i], _clock(leg["time"]), leg["distance"] / 1000.0, straight / 1000.0,
 				roundi(leg["distance"] - straight),
 			])
-			from = _layout.checkpoints[i]
+			from = _layout.waypoints[i]
 	# Соперники на момент конца заезда игрока.
 	if not _rivals.is_empty():
 		lines.append("")
 		for rival in _rivals:
 			var car = _sim.cars[rival.car_id]
-			var status: String = "в пути, взято точек %d" % car.next_checkpoint
+			var taken: int = _layout.checkpoints_among(car.next_checkpoint)
+			var status: String = "в пути, взято точек %d" % taken
 			if car.finish_step >= 0:
 				status = "финиш %s" % _clock(car.finish_step * RaceSim.DT)
 			elif car.state.fuel <= 0.0:
-				status = "пустой бак, взято точек %d" % car.next_checkpoint
+				status = "пустой бак, взято точек %d" % taken
 			lines.append("%d. %s: %s, заправок %d, ударов %d" % [
 				_sim.place_of(rival.car_id), rival.title, status, car.refuels, car.hits,
 			])
@@ -765,13 +769,15 @@ func _prestart_text() -> String:
 func _apply_stage() -> void:
 	var params: WorldGenParams = _world_params
 	if _terrain_mode == 0:
-		_sim.checkpoints = _layout.checkpoints
-		_sim.checkpoint_radius = _layout.checkpoint_radius
+		_layout.apply_to(_sim)
 		_sim.world_state.setup(_layout.depots, params.depot_stock, params.depot_portion,
 			params.depot_radius, params.depot_max_speed)
 		_stage_view.set_layout(_layout)
 	else:
 		_sim.checkpoints = PackedVector2Array()
+		_sim.checkpoint_radii = PackedFloat32Array()
+		_sim.leg_depots = PackedInt32Array()
+		_sim.walls = PackedVector2Array()
 		_sim.world_state.setup(PackedVector2Array(), 0.0, 0.0, params.depot_radius, params.depot_max_speed)
 		_stage_view.set_layout(null)
 	_stage_view.set_next_checkpoint(0)
@@ -853,7 +859,7 @@ func _build_hud_text() -> String:
 			var place_text: String = ""
 			if _sim.cars.size() > 1:
 				place_text = "     место %d из %d" % [_sim.place_of(_player.id), _sim.cars.size()]
-			lines.append("следующая контрольная точка: %d из %d%s" % [_player.next_checkpoint + 1, total, place_text])
+			lines.append("дальше: %s%s" % [_layout.waypoint_labels[_player.next_checkpoint], place_text])
 	# Склад: остаток виден, только когда машина на нём стоит.
 	var depot: int = _sim.world_state.depot_at(s.x, s.y)
 	if depot >= 0:

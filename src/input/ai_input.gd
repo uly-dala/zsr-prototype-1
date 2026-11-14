@@ -16,6 +16,8 @@ enum Kind { SPRINTER, MIDDLE, ECONOMY }
 const KIND_NAMES: Array = ["Спринтер", "Середняк", "Экономный"]
 ## ИИ принимает решения раз в столько шагов: 10 раз в секунду.
 const DECIDE_EVERY: int = 6
+## Объезд не ближе стольких метров к стене трассы.
+const WALL_CLEARANCE: float = 8.0
 ## Полоса перед машиной, в которой ищутся препятствия: половина ширины, м.
 const CORRIDOR: float = 3.0
 
@@ -25,6 +27,9 @@ var title: String = ""
 ## Крейсерская скорость этой машины, км/ч.
 var cruise_speed: float = 100.0
 var params: AiParams
+## Сколько заправок планирует эта машина; -1 — без ограничения.
+## По умолчанию берётся из параметров по типу.
+var max_refuels: int = -1
 
 var _rng: RandomNumberGenerator = RandomNumberGenerator.new()
 # Ошибка счисления: оценка положения = истинное положение + ошибка.
@@ -44,6 +49,8 @@ var _sent_steer: float = 0.0
 var _sent_throttle: float = 0.0
 var _avoiding: bool = false
 var _point_tried: Vector3 = Vector3.ZERO
+## Заход на вход трассы: машина уже в клине перед входом и едет вдоль оси.
+var _entry_follow: bool = false
 var _stuck_ticks: int = 0
 var _reverse_ticks: int = 0
 var _reverse_side: float = 1.0
@@ -56,6 +63,7 @@ func _init(p_car_id: int, p_kind: int, number: int, p_params: AiParams, world_se
 	title = "%s %d" % [KIND_NAMES[p_kind], number]
 	_rng.seed = hash(Vector3i(world_seed, 9001, p_car_id))
 	cruise_speed = _rng.randf_range(params.speed_min[p_kind], params.speed_max[p_kind])
+	max_refuels = params.max_refuels[p_kind]
 	_error_direction = _rng.randf() * TAU
 	if _rng.randf() < 0.5:
 		_reverse_side = -1.0
@@ -113,6 +121,17 @@ func decide(sim, terrain, landmarks: Array) -> void:
 	var aim: Vector2 = target - position
 	if not in_sight:
 		aim = target - (position + _error)
+	# Вход на трассу: если машина сбоку от него, сначала выйти на ось.
+	var lining_up: bool = false
+	var entering: bool = false
+	if _depot < 0 and _is_track_entry(sim):
+		var believed: Vector2 = position
+		if not in_sight:
+			believed = position + _error
+		var approach: Vector2 = _entry_approach(sim, believed)
+		lining_up = not _entry_follow
+		entering = true
+		aim = approach - believed
 
 	# Скорость: крейсерская или экономная; на подходе к цели — такая, чтобы
 	# автоматика успела довернуть; малая для проезда склада.
@@ -126,11 +145,17 @@ func decide(sim, terrain, landmarks: Array) -> void:
 			var grip: float = car.sim.max_lateral_accel(state.mass, surface, car.sim.params.autopilot_lateral_share)
 			var turn_limit: float = sqrt(grip * radius * 0.6) * 3.6
 			wanted_speed = minf(wanted_speed, maxf(turn_limit, params.approach_speed_min))
+	if _depot < 0 and _on_track(sim, true_distance):
+		wanted_speed = minf(wanted_speed, params.track_speed)
+	if entering:
+		wanted_speed = minf(wanted_speed, params.track_speed)
+	if lining_up:
+		wanted_speed = minf(wanted_speed, params.track_entry_speed)
 	if _depot >= 0 and in_sight:
 		var slow: float = params.depot_speed / 3.6
 		var braking: float = maxf(0.0, speed * speed - slow * slow) / (2.0 * car.sim.params.autopilot_max_brake)
 		if true_distance < braking + 40.0:
-			wanted_speed = params.depot_speed
+			wanted_speed = minf(wanted_speed, params.depot_speed)
 	_set_speed(sim, wanted_speed)
 
 	# Упёрся в препятствие: отъехать задним ходом с рулём в сторону.
@@ -153,6 +178,62 @@ func decide(sim, terrain, landmarks: Array) -> void:
 	if _avoid_obstacle(sim, terrain, car, state, speed):
 		return
 	_set_course(sim, rad_to_deg(atan2(aim.x, aim.y)))
+
+
+## Едет ли машина по участку трассы с границами: цель — ворота, и это либо
+## не первые ворота, либо до входа осталось меньше 150 м.
+func _on_track(sim, distance_to_target: float) -> bool:
+	if _leg >= sim.checkpoint_radii.size():
+		return false
+	if sim.checkpoint_radii[_leg] >= sim.checkpoint_radius:
+		return false
+	if _leg > 0 and sim.checkpoint_radii[_leg - 1] < sim.checkpoint_radius:
+		return true
+	return distance_to_target < 150.0
+
+
+## Цель — первые ворота трассы: сами ворота узкие, место перед ними в списке
+## широкое, место после них узкое.
+func _is_track_entry(sim) -> bool:
+	if _leg + 1 >= sim.checkpoint_radii.size():
+		return false
+	if sim.checkpoint_radii[_leg] >= sim.checkpoint_radius:
+		return false
+	if _leg > 0 and sim.checkpoint_radii[_leg - 1] < sim.checkpoint_radius:
+		return false
+	return sim.checkpoint_radii[_leg + 1] < sim.checkpoint_radius
+
+
+## Куда ехать, чтобы попасть во вход трассы ровно, а не боком.
+## - Машина перед входом и внутри сужающегося к нему клина: едет вдоль оси
+##   трассы, целясь в место на оси на 80 м впереди себя.
+## - Машина перед входом, но далеко от оси: едет на ось в 600 м до входа,
+##   пока не окажется в клине.
+## - Машина сбоку от стен или за входом: уезжает назад и в сторону от стен.
+func _entry_approach(sim, believed: Vector2) -> Vector2:
+	var gate: Vector2 = sim.checkpoints[_leg]
+	var direction: Vector2 = (sim.checkpoints[_leg + 1] - gate).normalized()
+	var side: Vector2 = direction.orthogonal()
+	var offset: Vector2 = believed - gate
+	var along: float = offset.dot(direction)
+	var across: float = offset.dot(side)
+	var half_width: float = sim.checkpoint_radii[_leg]
+	var back: float = params.track_entry_distance
+	if along > -60.0 and absf(across) > half_width:
+		_entry_follow = false
+	if not _entry_follow:
+		if along > -150.0:
+			if absf(across) < half_width and along <= 0.0:
+				_entry_follow = true
+		elif absf(across) < 0.5 * (-along - 150.0):
+			_entry_follow = true
+	if _entry_follow:
+		if along > -80.0:
+			return gate
+		return gate + direction * (along + 80.0)
+	if along > -150.0:
+		return gate - direction * back + side * signf(across) * 200.0
+	return gate - direction * back
 
 
 # --- Счисление ----------------------------------------------------------------
@@ -212,28 +293,56 @@ func _route_left(sim, position: Vector2) -> float:
 	return total
 
 
-## План на отрезок: заезжать ли на склад этого отрезка.
+## Может ли машина ещё заправляться по своему плану.
+func _may_refuel(car) -> bool:
+	return max_refuels < 0 or car.refuels < max_refuels
+
+
+## Путь до следующего места, где можно взять топливо, если пропустить склад
+## этого отрезка: до склада следующего отрезка, а если его нет — до финиша.
+func _reach_after_skip(sim, car, position: Vector2) -> float:
+	if not _may_refuel(car):
+		return _route_left(sim, position)
+	var depots: PackedVector2Array = sim.world_state.depots
+	var checkpoints: PackedVector2Array = sim.checkpoints
+	var total: float = position.distance_to(checkpoints[_leg])
+	var from: Vector2 = checkpoints[_leg]
+	for next_leg in range(_leg + 1, checkpoints.size()):
+		var depot: int = sim.depot_of_leg(next_leg)
+		if depot >= 0:
+			return total + from.distance_to(depots[depot])
+		total += from.distance_to(checkpoints[next_leg])
+		from = checkpoints[next_leg]
+	return _route_left(sim, position)
+
+
+## План на отрезок: заезжать ли на склад этого отрезка. ИИ заправляется как
+## можно позже: едет на склад, только если без него не дотянуть до следующего.
+## Так машины расходятся по складам, а не опустошают первые два.
 func _plan_leg(sim, car, position: Vector2) -> void:
 	_depot = -1
+	_entry_follow = false
 	_point_tried = Vector3.ZERO
 	_hard_surface = sim.terrain.hard if "hard" in sim.terrain else sim.terrain.sample(position.x, position.y).surface
 	var world_state = sim.world_state
-	var needed: float = _fuel_needed(car, _route_left(sim, position), cruise_speed)
-	var space: float = car.sim.params.fuel_capacity - car.state.fuel
-	if car.state.fuel < needed and _leg < world_state.depots.size() and not car.depots_used.has(_leg):
-		var leg_needed: float = _fuel_needed(car, position.distance_to(sim.checkpoints[_leg]), cruise_speed)
-		if space >= params.min_refuel_space or car.state.fuel < leg_needed:
-			_depot = _leg
+	var fuel: float = car.state.fuel
+	var space: float = car.sim.params.fuel_capacity - fuel
+	var depot: int = sim.depot_of_leg(_leg)
+	if _may_refuel(car) and depot >= 0 and not car.depots_used.has(depot):
+		var to_finish: float = _fuel_needed(car, _route_left(sim, position), cruise_speed)
+		var to_next_supply: float = _fuel_needed(car, _reach_after_skip(sim, car, position), cruise_speed)
+		if fuel < to_finish and fuel < to_next_supply and space >= params.min_refuel_space:
+			_depot = depot
 	_plan_speed(sim, car, position)
 
 
-## Скорость в пути: самая большая, на которой топлива хватает до финиша.
-## Если впереди на этом отрезке склад, ИИ рассчитывает на него и не экономит.
+## Скорость в пути: самая большая, на которой топлива хватает до следующей
+## заправки, а если заправок больше не будет — до финиша.
 func _plan_speed(sim, car, position: Vector2) -> void:
 	_travel_speed = cruise_speed
 	if _depot >= 0 or _hard_surface == null:
 		return
-	var left: float = _route_left(sim, position)
+	var left: float = _reach_after_skip(sim, car, position)
 	var factor: float = _cost_factor(car) * params.fuel_margin
 	var speed: float = cruise_speed
 	while speed > params.saving_speed_min and car.state.fuel < left * _flat_cost(car, speed) * factor:
@@ -269,19 +378,33 @@ func _avoid_obstacle(sim, terrain, car, state, speed: float) -> bool:
 		# Далеко: если заметил заранее, объехать точкой сбоку от препятствия.
 		if noticed_early and not car.point_active and not _avoiding and obstacle != _point_tried:
 			_point_tried = obstacle
-			var side: float = 1.0
-			if lateral >= 0.0:
-				side = -1.0
+			var side: float = _pass_side(sim, obstacle, right, lateral)
 			var beside: Vector2 = Vector2(obstacle.x, obstacle.y) + right * side * (obstacle.z + params.clearance)
 			sim.submit(Command.new(Command.Type.SET_POINT, car_id, beside.x, beside.y, true))
 		return car.point_active
 	# Близко: перехват руля в сторону от препятствия.
-	var steer: float = 1.0
-	if lateral >= 0.0:
-		steer = -1.0
+	var steer: float = _pass_side(sim, obstacle, right, lateral)
 	_avoiding = true
 	_set_manual(sim, steer, 0.0)
 	return true
+
+
+## С какой стороны объезжать: 1 — справа, -1 — слева. Обычно с той, что
+## ближе; но если там вплотную стена трассы — с другой.
+func _pass_side(sim, obstacle: Vector3, right: Vector2, lateral: float) -> float:
+	var side: float = 1.0
+	if lateral >= 0.0:
+		side = -1.0
+	var beside: Vector2 = Vector2(obstacle.x, obstacle.y) + right * side * (obstacle.z + params.clearance)
+	var index: int = 0
+	while index + 1 < sim.walls.size():
+		var from: Vector2 = sim.walls[index]
+		var axis: Vector2 = sim.walls[index + 1] - from
+		var along: float = clampf((beside - from).dot(axis) / axis.length_squared(), 0.0, 1.0)
+		if beside.distance_to(from + axis * along) < WALL_CLEARANCE:
+			return -side
+		index += 2
+	return side
 
 
 # --- Команды: отправляются только при изменении --------------------------------

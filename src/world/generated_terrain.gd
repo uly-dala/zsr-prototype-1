@@ -32,6 +32,7 @@ var _sample: TerrainSample = TerrainSample.new()
 var _obstacle_cache: Dictionary = {}
 # Места без препятствий и скользких полей: x — восток, y — север, z — радиус.
 var _clear_zones: PackedVector3Array = PackedVector3Array()
+var _extra_obstacles: PackedFloat32Array = PackedFloat32Array()
 
 
 ## clear_zones — места, где не должно быть препятствий и скользких полей
@@ -56,6 +57,13 @@ func _init(p_params: WorldGenParams, p_hard: SurfaceParams, p_sand: SurfaceParam
 	_sand_noise.fractal_type = FastNoiseLite.FRACTAL_FBM
 	_sand_noise.fractal_octaves = 2
 	_place_fields()
+
+
+## Препятствия, заданные явно (например, на участке трассы): по четыре числа —
+## восток, север, радиус, вид. Задаются до первого запроса препятствий.
+func set_extra_obstacles(list: PackedFloat32Array) -> void:
+	_extra_obstacles = list
+	_obstacle_cache.clear()
 
 
 # --- Запросы симуляции --------------------------------------------------------
@@ -219,6 +227,13 @@ func build_obstacles(cx: int, cy: int) -> PackedFloat32Array:
 		result.append(y)
 		result.append(radius)
 		result.append(kind)
+	# Заданные явно препятствия, попавшие в эту часть.
+	var index: int = 0
+	while index < _extra_obstacles.size():
+		if int(floor(_extra_obstacles[index] / size)) == cx and int(floor(_extra_obstacles[index + 1] / size)) == cy:
+			for offset in OBSTACLE_STRIDE:
+				result.append(_extra_obstacles[index + offset])
+		index += OBSTACLE_STRIDE
 	return result
 
 
