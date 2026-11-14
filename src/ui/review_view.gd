@@ -14,6 +14,10 @@ var _title: String = ""
 var _lines: PackedStringArray = PackedStringArray()
 
 
+## Строка внизу: что делают клавиши.
+var footer: String = "R или Enter — новый заезд"
+
+
 func _ready() -> void:
 	visible = false
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -55,7 +59,7 @@ func _draw() -> void:
 	y += chart_height + 30.0
 	draw_string(font, Vector2(left, y), "удар — красная черта     заправка — синяя     контрольная точка — жёлтая",
 		HORIZONTAL_ALIGNMENT_LEFT, width, 15, Color(1.0, 1.0, 1.0, 0.7))
-	draw_string(font, Vector2(left, size.y - 28.0), "R или Enter — новый заезд",
+	draw_string(font, Vector2(left, size.y - 28.0), footer,
 		HORIZONTAL_ALIGNMENT_LEFT, width, 20, Color(1.0, 0.9, 0.5))
 
 

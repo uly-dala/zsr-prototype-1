@@ -27,3 +27,4 @@ depot_speed = 25.0
 track_speed = 80.0
 track_entry_speed = 60.0
 track_entry_distance = 600.0
+refuel_limit_route = 16000.0

@@ -38,6 +38,10 @@ var _error_direction: float = 0.0
 var _last_distance: float = 0.0
 var _leg: int = -1
 var _depot: int = -1
+## Склады этого отрезка, о которых ещё не решено, по порядку.
+var _queue: Array = []
+## Склады, которые эта машина видела пустыми.
+var _known_empty: Dictionary = {}
 ## Скорость с учётом экономии топлива, км/ч.
 var _travel_speed: float = 100.0
 var _start_fuel: float = -1.0
@@ -89,11 +93,17 @@ func decide(sim, terrain, landmarks: Array) -> void:
 	if state.fuel <= 0.0:
 		# Пустой бак: заезд для машины закончен.
 		return
+	if sim.step_index < car.start_step:
+		# Машина ждёт своего старта (раздел 2.3).
+		return
 	var position: Vector2 = Vector2(state.x, state.y)
 	var speed: float = state.speed()
 	if _start_fuel < 0.0:
 		_start_fuel = state.fuel
 		_travel_speed = cruise_speed
+		if sim.route_length(position) > params.refuel_limit_route:
+			# На длинном маршруте бака не хватает никому: заправок сколько нужно.
+			max_refuels = -1
 
 	_update_error(state, position, landmarks)
 	if car.next_checkpoint != _leg:
@@ -107,8 +117,11 @@ func decide(sim, terrain, landmarks: Array) -> void:
 	if _depot >= 0:
 		var seen_empty: bool = position.distance_to(world_state.depots[_depot]) < params.sight_radius \
 				and world_state.stock[_depot] <= 0.0
+		if seen_empty:
+			_known_empty[_depot] = true
 		if car.depots_used.has(_depot) or seen_empty:
-			_depot = -1
+			# Склад пройден: решить про следующий склад этого отрезка.
+			_choose_depot(sim, car, position)
 			_plan_speed(sim, car, position)
 	if sim.step_index % 300 == 0:
 		# Раз в 5 секунд ИИ пересчитывает, хватит ли топлива на этой скорости.
@@ -136,7 +149,7 @@ func decide(sim, terrain, landmarks: Array) -> void:
 	# Скорость: крейсерская или экономная; на подходе к цели — такая, чтобы
 	# автоматика успела довернуть; малая для проезда склада.
 	var wanted_speed: float = _travel_speed
-	if in_sight:
+	if in_sight and not lining_up:
 		var off_course: float = absf(wrapf(atan2(aim.x, aim.y) - state.heading, -PI, PI))
 		if off_course > 0.03:
 			# Радиус дуги, которая приводит в цель с текущего курса.
@@ -164,7 +177,7 @@ func decide(sim, terrain, landmarks: Array) -> void:
 		if _reverse_ticks == 0:
 			_set_manual(sim, 0.0, 0.0)
 		return
-	if car.blocked_left <= 0.0 and speed < 0.5 and sim.step_index > 180:
+	if car.blocked_left <= 0.0 and speed < 0.5 and sim.step_index > car.start_step + 180:
 		_stuck_ticks += 1
 	else:
 		_stuck_ticks = 0
@@ -298,42 +311,68 @@ func _may_refuel(car) -> bool:
 	return max_refuels < 0 or car.refuels < max_refuels
 
 
-## Путь до следующего места, где можно взять топливо, если пропустить склад
-## этого отрезка: до склада следующего отрезка, а если его нет — до финиша.
-func _reach_after_skip(sim, car, position: Vector2) -> float:
+## Можно ли рассчитывать на склад: машина его ещё не использовала
+## и не видела пустым.
+func _depot_usable(car, depot: int) -> bool:
+	return not car.depots_used.has(depot) and not _known_empty.has(depot)
+
+
+## Путь до следующего места, где можно взять топливо. Склады этого отрезка
+## из очереди считаются, начиная с номера skip (0 — все, 1 — без первого).
+## Если складов впереди нет или заправок больше не будет — путь до финиша.
+func _supply_distance(sim, car, position: Vector2, skip: int) -> float:
 	if not _may_refuel(car):
 		return _route_left(sim, position)
 	var depots: PackedVector2Array = sim.world_state.depots
+	for index in range(skip, _queue.size()):
+		if _depot_usable(car, _queue[index]):
+			return position.distance_to(depots[_queue[index]])
 	var checkpoints: PackedVector2Array = sim.checkpoints
 	var total: float = position.distance_to(checkpoints[_leg])
 	var from: Vector2 = checkpoints[_leg]
 	for next_leg in range(_leg + 1, checkpoints.size()):
-		var depot: int = sim.depot_of_leg(next_leg)
-		if depot >= 0:
-			return total + from.distance_to(depots[depot])
+		for depot in sim.depots_of_leg(next_leg):
+			if _depot_usable(car, depot):
+				return total + from.distance_to(depots[depot])
 		total += from.distance_to(checkpoints[next_leg])
 		from = checkpoints[next_leg]
 	return _route_left(sim, position)
 
 
-## План на отрезок: заезжать ли на склад этого отрезка. ИИ заправляется как
-## можно позже: едет на склад, только если без него не дотянуть до следующего.
-## Так машины расходятся по складам, а не опустошают первые два.
+## План на отрезок: на какие склады этого отрезка заезжать.
 func _plan_leg(sim, car, position: Vector2) -> void:
 	_depot = -1
 	_entry_follow = false
 	_point_tried = Vector3.ZERO
 	_hard_surface = sim.terrain.hard if "hard" in sim.terrain else sim.terrain.sample(position.x, position.y).surface
-	var world_state = sim.world_state
+	_queue = []
+	for depot in sim.depots_of_leg(_leg):
+		_queue.append(depot)
+	_choose_depot(sim, car, position)
+	_plan_speed(sim, car, position)
+
+
+## Выбрать следующий склад отрезка. ИИ заправляется как можно позже: едет
+## на склад, только если без него не дотянуть до следующего места с топливом.
+## Так машины расходятся по складам, а не опустошают первые.
+func _choose_depot(sim, car, position: Vector2) -> void:
+	_depot = -1
 	var fuel: float = car.state.fuel
-	var space: float = car.sim.params.fuel_capacity - fuel
-	var depot: int = sim.depot_of_leg(_leg)
-	if _may_refuel(car) and depot >= 0 and not car.depots_used.has(depot):
+	while not _queue.is_empty():
+		var depot: int = _queue[0]
+		if not _depot_usable(car, depot) or not _may_refuel(car):
+			_queue.remove_at(0)
+			continue
 		var to_finish: float = _fuel_needed(car, _route_left(sim, position), cruise_speed)
-		var to_next_supply: float = _fuel_needed(car, _reach_after_skip(sim, car, position), cruise_speed)
+		var to_next_supply: float = _fuel_needed(car, _supply_distance(sim, car, position, 1), cruise_speed)
+		# К складу машина приедет с меньшим запасом, чем сейчас.
+		var depots: PackedVector2Array = sim.world_state.depots
+		var burned: float = _fuel_needed(car, position.distance_to(depots[depot]), cruise_speed)
+		var space: float = car.sim.params.fuel_capacity - maxf(0.0, fuel - burned)
+		_queue.remove_at(0)
 		if fuel < to_finish and fuel < to_next_supply and space >= params.min_refuel_space:
 			_depot = depot
-	_plan_speed(sim, car, position)
+			return
 
 
 ## Скорость в пути: самая большая, на которой топлива хватает до следующей
@@ -342,7 +381,7 @@ func _plan_speed(sim, car, position: Vector2) -> void:
 	_travel_speed = cruise_speed
 	if _depot >= 0 or _hard_surface == null:
 		return
-	var left: float = _reach_after_skip(sim, car, position)
+	var left: float = _supply_distance(sim, car, position, 0)
 	var factor: float = _cost_factor(car) * params.fuel_margin
 	var speed: float = cruise_speed
 	while speed > params.saving_speed_min and car.state.fuel < left * _flat_cost(car, speed) * factor:

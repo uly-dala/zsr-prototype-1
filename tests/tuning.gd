@@ -13,6 +13,7 @@ const RaceSim = preload("res://src/race/race_sim.gd")
 const WorldGenParams = preload("res://src/world/world_gen_params.gd")
 const GeneratedTerrain = preload("res://src/world/generated_terrain.gd")
 const StageLayout = preload("res://src/world/stage_layout.gd")
+const RaceParams = preload("res://src/race/race_params.gd")
 const AiParams = preload("res://src/input/ai_params.gd")
 const AiInput = preload("res://src/input/ai_input.gd")
 
@@ -39,6 +40,7 @@ func run() -> void:
 	_terrain_cost()
 	_strategies()
 	_full_races()
+	_long_formats()
 
 
 func _say(text: String) -> void:
@@ -117,7 +119,7 @@ func _terrain_cost() -> void:
 ## Заезд соперников без игрока. racers — словари с ключами kind, и по желанию
 ## cruise (км/ч), fuel (кг), refuels (предел заправок).
 ## Возвращает словарь: cars — итоги машин, stock — остатки складов.
-func _race(world_params: WorldGenParams, racers: Array) -> Dictionary:
+func _race(world_params: WorldGenParams, racers: Array, step_limit: int = STEP_LIMIT) -> Dictionary:
 	var layout: StageLayout = StageLayout.new(world_params)
 	var world: GeneratedTerrain = GeneratedTerrain.new(world_params, _hard, _sand, _slick, layout.clear_zones())
 	var race: RaceSim = RaceSim.new(world)
@@ -141,7 +143,7 @@ func _race(world_params: WorldGenParams, racers: Array) -> Dictionary:
 		race.add_car(_car, fuel, (rivals.size() - racers.size() * 0.5) * 7.0, 0.0, 0.0)
 		rivals.append(rival)
 	var running: bool = true
-	while running and race.step_index < STEP_LIMIT:
+	while running and race.step_index < step_limit:
 		for rival in rivals:
 			rival.decide(race, world, layout.landmarks)
 		race.step()
@@ -252,3 +254,46 @@ func _full_races() -> void:
 				seed_value, finished[0], finished[1], finished[2], _clock(best[0]), _clock(best[1]), _clock(best[2]),
 				hits, int(taken), stock_text,
 			])
+
+
+# --- 4. Длинные форматы ----------------------------------------------------------
+
+## Девять соперников на этапе формата «Этапы» и на марафоне: кто доехал,
+## за сколько, сколько заправок и что осталось на складах.
+func _long_formats() -> void:
+	_say("")
+	_say("== 4. Длинные форматы: девять соперников, без игрока")
+	var racers: Array = []
+	for kind in 3:
+		for number in 3:
+			racers.append({"kind": kind})
+	for path in ["res://data/format_stages.tres", "res://data/format_marathon.tres"]:
+		var format: RaceParams = load(path) as RaceParams
+		if format == null or format.world == null:
+			_say("файл формата не загрузился: %s" % path)
+			continue
+		var stages: int = mini(format.stage_count(), 2)
+		for stage in stages:
+			var world_params: WorldGenParams = format.stage_world(stage) as WorldGenParams
+			var limit: int = int(world_params.route_length / 1000.0 * format.time_limit_per_km * 60.0)
+			var started: int = Time.get_ticks_msec()
+			var outcome: Dictionary = _race(world_params, racers, limit)
+			_say("-- %s, этап %d: маршрут %.1f км, расчёт %.0f с" % [format.title, stage + 1,
+				outcome["route"] / 1000.0, (Time.get_ticks_msec() - started) / 1000.0])
+			for car in outcome["cars"]:
+				var status: String = "НЕ ДОЕХАЛ, точек %d, топливо %d кг" % [car["points"], int(car["fuel"])]
+				if car["finished"]:
+					status = "финиш %s, топливо %d кг" % [_long_clock(car["time"]), int(car["fuel"])]
+				_say("%s, %d км/ч: %s, путь %.1f км, заправок %d (%d кг), ударов %d" % [car["title"], int(car["cruise"]),
+					status, car["distance"] / 1000.0, car["refuels"], int(car["taken"]), car["hits"]])
+			var stock_text: String = ""
+			for value in outcome["stock"]:
+				stock_text += " %d" % int(value)
+			_say("остатки на складах, кг:%s" % stock_text)
+
+
+func _long_clock(seconds: float) -> String:
+	var whole: int = int(seconds)
+	if whole >= 3600:
+		return "%d:%02d:%02d" % [int(whole / 3600.0), int(whole / 60.0) % 60, whole % 60]
+	return "%d:%02d" % [int(whole / 60.0), whole % 60]

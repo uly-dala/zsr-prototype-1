@@ -208,8 +208,11 @@ func _draw_map() -> void:
 	if review_mode:
 		_draw_review_events()
 	if banner != "":
-		_canvas.draw_rect(Rect2(0.0, 0.0, size.x, 44.0), Color(0.0, 0.0, 0.0, 0.7))
-		_canvas.draw_string(font, Vector2(14.0, 30.0), banner, HORIZONTAL_ALIGNMENT_LEFT, -1.0, 20, Color(1.0, 0.92, 0.6))
+		# Строк может быть несколько: они разделены переводом строки.
+		var banner_lines: PackedStringArray = banner.split("\n")
+		_canvas.draw_rect(Rect2(0.0, 0.0, size.x, 18.0 + 26.0 * banner_lines.size()), Color(0.0, 0.0, 0.0, 0.7))
+		for i in banner_lines.size():
+			_canvas.draw_string(font, Vector2(14.0, 30.0 + 26.0 * i), banner_lines[i], HORIZONTAL_ALIGNMENT_LEFT, -1.0, 20, Color(1.0, 0.92, 0.6))
 	_canvas.draw_rect(Rect2(Vector2.ZERO, size), Color(0.9, 0.85, 0.7, 0.8), false, 2.0)
 	_canvas.draw_string(font, Vector2(14.0, size.y - 14.0),
 		_legend_text(),

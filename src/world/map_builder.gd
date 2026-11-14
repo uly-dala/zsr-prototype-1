@@ -1,32 +1,56 @@
 extends RefCounted
 ## Картинка карты заезда (раздел 9.4): строится один раз перед стартом
-## из слоя данных. Функция чистая, её можно вызывать из фонового потока.
+## из слоя данных. Функции чистые, их можно вызывать из фоновых потоков.
+## Большая карта строится полосами в нескольких потоках сразу.
 ##
 ## На картинке: покрытия, отмывка и горизонтали. Контрольные точки, ориентиры,
 ## сетка и стрелки ветра рисуются поверх на экране карты.
 
 
+## Размер картинки в пикселях для прямоугольника местности.
+static func image_size(terrain, area_min: Vector2, area_max: Vector2) -> Vector2i:
+	var step_size: float = terrain.params.map_meters_per_pixel
+	return Vector2i(
+		maxi(1, int(round((area_max.x - area_min.x) / step_size))),
+		maxi(1, int(round((area_max.y - area_min.y) / step_size))))
+
+
 ## terrain — GeneratedTerrain. Картинка покрывает прямоугольник от area_min
 ## (юго-запад) до area_max (северо-восток); верхняя строка — север.
 static func build_image(terrain, area_min: Vector2, area_max: Vector2) -> Image:
+	var size: Vector2i = image_size(terrain, area_min, area_max)
+	return assemble(size, [build_band(terrain, area_min, area_max, 0, size.y)])
+
+
+## Собрать картинку из полос, идущих сверху вниз.
+static func assemble(size: Vector2i, bands: Array) -> Image:
+	var bytes: PackedByteArray = PackedByteArray()
+	for band in bands:
+		bytes.append_array(band)
+	return Image.create_from_data(size.x, size.y, false, Image.FORMAT_RGB8, bytes)
+
+
+## Полоса картинки: строки от row_from до row_to, не включая row_to.
+## Возвращает по три байта на пиксель.
+static func build_band(terrain, area_min: Vector2, area_max: Vector2, row_from: int, row_to: int) -> PackedByteArray:
 	var step_size: float = terrain.params.map_meters_per_pixel
 	var interval: float = terrain.params.map_contour_interval
-	var width: int = maxi(1, int(round((area_max.x - area_min.x) / step_size)))
-	var height: int = maxi(1, int(round((area_max.y - area_min.y) / step_size)))
+	var width: int = image_size(terrain, area_min, area_max).x
+	var rows: int = row_to - row_from
 
 	# Высоты в узлах сетки: на один ряд и столбец больше, чем пикселей.
 	var heights: PackedFloat32Array = PackedFloat32Array()
-	heights.resize((width + 1) * (height + 1))
-	for row in height + 1:
-		var north: float = area_max.y - row * step_size
+	heights.resize((width + 1) * (rows + 1))
+	for row in rows + 1:
+		var north: float = area_max.y - (row_from + row) * step_size
 		for column in width + 1:
 			heights[row * (width + 1) + column] = terrain.height_at(area_min.x + column * step_size, north)
 
 	var bytes: PackedByteArray = PackedByteArray()
-	bytes.resize(width * height * 3)
+	bytes.resize(width * rows * 3)
 	var index: int = 0
-	for row in height:
-		var north: float = area_max.y - (row + 0.5) * step_size
+	for row in rows:
+		var north: float = area_max.y - (row_from + row + 0.5) * step_size
 		for column in width:
 			var east: float = area_min.x + (column + 0.5) * step_size
 			var here: float = heights[row * (width + 1) + column]
@@ -50,4 +74,4 @@ static func build_image(terrain, area_min: Vector2, area_max: Vector2) -> Image:
 			bytes[index + 1] = int(clampf(color.g, 0.0, 1.0) * 255.0)
 			bytes[index + 2] = int(clampf(color.b, 0.0, 1.0) * 255.0)
 			index += 3
-	return Image.create_from_data(width, height, false, Image.FORMAT_RGB8, bytes)
+	return bytes

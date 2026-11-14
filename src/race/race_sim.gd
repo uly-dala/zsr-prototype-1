@@ -25,9 +25,9 @@ var checkpoint_radius: float = 40.0
 ## Свой радиус для каждого места списка (ворота трассы уже контрольных точек).
 ## Если список пуст, у всех checkpoint_radius.
 var checkpoint_radii: PackedFloat32Array = PackedFloat32Array()
-## Склад на пути к каждому месту списка или -1. Если список пуст, склад
-## с тем же номером, что и место.
-var leg_depots: PackedInt32Array = PackedInt32Array()
+## Склады на пути к каждому месту списка: массив списков номеров складов
+## по порядку. Если массив пуст, к месту ведёт склад с тем же номером.
+var leg_depots: Array = []
 ## Сплошные стены: пары точек «начало, конец» (участок трассы с границами).
 var walls: PackedVector2Array = PackedVector2Array()
 ## Склады топлива и их остатки (раздел 5.5). Остатки — изменяемое состояние
@@ -63,6 +63,8 @@ func submit(command: Command) -> void:
 ## Продвинуть заезд на один шаг.
 func step() -> void:
 	for car in cars:
+		if car.halted or step_index < car.start_step:
+			continue
 		car.step(terrain.sample(car.state.x, car.state.y), DT)
 		# Препятствия сплошные: после шага машина выталкивается наружу.
 		var margin: float = car.sim.params.collision_margin
@@ -75,17 +77,27 @@ func step() -> void:
 	step_index += 1
 
 
-## Склад, который лежит на пути к месту списка с номером leg, или -1.
-func depot_of_leg(leg: int) -> int:
+## Склады, которые лежат на пути к месту списка с номером leg, по порядку.
+func depots_of_leg(leg: int) -> PackedInt32Array:
 	if leg < 0:
-		return -1
+		return PackedInt32Array()
 	if not leg_depots.is_empty():
 		if leg < leg_depots.size():
 			return leg_depots[leg]
-		return -1
+		return PackedInt32Array()
 	if leg < world_state.depots.size():
-		return leg
-	return -1
+		return PackedInt32Array([leg])
+	return PackedInt32Array()
+
+
+## Длина маршрута по прямым: от места from через все места списка, м.
+func route_length(from: Vector2) -> float:
+	var total: float = 0.0
+	var previous: Vector2 = from
+	for checkpoint in checkpoints:
+		total += previous.distance_to(checkpoint)
+		previous = checkpoint
+	return total
 
 
 ## Стены сплошные: машина не подходит к стене ближе margin. Ближайшая точка

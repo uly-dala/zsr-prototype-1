@@ -1,0 +1,13 @@
+[gd_resource type="Resource" load_steps=3 format=3]
+
+[ext_resource type="Script" path="res://src/race/race_params.gd" id="1_script"]
+[ext_resource type="Resource" path="res://data/world_marathon.tres" id="2_world"]
+
+[resource]
+script = ExtResource("1_script")
+title = "Марафон"
+world = ExtResource("2_world")
+seeds = PackedInt32Array(21)
+start_gap_max = 60.0
+dnf_penalty = 300.0
+time_limit_per_km = 90.0

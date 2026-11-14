@@ -44,8 +44,11 @@ var waypoint_radii: PackedFloat32Array = PackedFloat32Array()
 var waypoint_labels: PackedStringArray = PackedStringArray()
 ## Номер контрольной точки для каждого места в списке, с нуля; у ворот -1.
 var waypoint_checkpoint: PackedInt32Array = PackedInt32Array()
-## Склад, который лежит на пути к этому месту, или -1.
-var leg_depots: PackedInt32Array = PackedInt32Array()
+## Склады на пути к каждому месту списка, по порядку: массив списков номеров.
+## У ворот трассы список пуст.
+var leg_depots: Array = []
+## Склады каждого отрезка между контрольными точками, по порядку.
+var _depots_by_leg: Array = []
 
 var _track_leg: int = -1
 
@@ -160,7 +163,7 @@ func _build_waypoints() -> void:
 				waypoint_radii.append(track_half_width)
 				waypoint_labels.append("ворота трассы %d из %d" % [g + 1, gates.size()])
 				waypoint_checkpoint.append(-1)
-				leg_depots.append(-1)
+				leg_depots.append(PackedInt32Array())
 		waypoints.append(checkpoints[i])
 		waypoint_radii.append(checkpoint_radius)
 		if i == checkpoints.size() - 1:
@@ -168,10 +171,10 @@ func _build_waypoints() -> void:
 		else:
 			waypoint_labels.append("контрольная точка %d" % (i + 1))
 		waypoint_checkpoint.append(i)
-		if i < depots.size():
-			leg_depots.append(i)
+		if i < _depots_by_leg.size():
+			leg_depots.append(_depots_by_leg[i])
 		else:
-			leg_depots.append(-1)
+			leg_depots.append(PackedInt32Array())
 
 
 ## Передать симуляции всё, что проходится по порядку, и стены трассы.
@@ -198,41 +201,55 @@ static func detour_length(from: Vector2, via: Vector2, to: Vector2) -> float:
 	return from.distance_to(via) + via.distance_to(to) - from.distance_to(to)
 
 
-## Склады лежат в стороне от прямых между контрольными точками (раздел 5.5):
-## по одному на отрезок, крюк от depot_detour_min до depot_detour_max.
+## Склады стоят в стороне от отрезков маршрута; смещение подобрано под крюк
+## от depot_detour_min до depot_detour_max. Склады делятся между отрезками
+## поровну, лишние достаются первым отрезкам; внутри отрезка стоят по порядку.
 func _place_depots(params: WorldGenParams, rng: RandomNumberGenerator) -> void:
 	depot_radius = params.depot_radius
+	var legs: int = checkpoints.size()
 	var from: Vector2 = start
-	for i in mini(params.depot_count, checkpoints.size()):
+	for i in legs:
 		var to: Vector2 = checkpoints[i]
-		var along: float = rng.randf_range(0.35, 0.65)
-		if has_track and i == _track_leg:
-			# На отрезке с трассой склад стоит после её выхода.
-			var after_track: float = (from.distance_to(track_end) + 300.0) / from.distance_to(to)
-			# Случайное число то же, что без трассы: остальные склады и ориентиры
-			# от появления трассы не сдвигаются.
-			along = lerpf(minf(after_track, 0.85), 0.9, (along - 0.35) / 0.3)
-		var detour: float = rng.randf_range(params.depot_detour_min, params.depot_detour_max)
-		var side: float = 1.0
-		if rng.randf() < 0.5:
-			side = -1.0
-		var base: Vector2 = from.lerp(to, along)
-		var normal: Vector2 = (to - from).normalized().orthogonal()
-		# Смещение от отрезка подбирается делением пополам под нужный крюк.
-		var low: float = 0.0
-		var high: float = 3000.0
-		for step in 30:
-			var middle: float = (low + high) * 0.5
-			if detour_length(from, base + normal * middle, to) < detour:
-				low = middle
-			else:
-				high = middle
-		var spot: Vector2 = base + normal * low * side
-		var edge: float = 200.0
-		if spot.x < params.area_min.x + edge or spot.x > params.area_max.x - edge \
-				or spot.y < params.area_min.y + edge or spot.y > params.area_max.y - edge:
-			spot = base - normal * low * side
-		depots.append(spot)
+		var on_leg: int = int(params.depot_count / float(legs))
+		if i < params.depot_count % legs:
+			on_leg += 1
+		var list: PackedInt32Array = PackedInt32Array()
+		for number in on_leg:
+			var along: float = rng.randf_range(0.35, 0.65)
+			if on_leg > 1:
+				along = (number + along) / on_leg
+			if has_track and i == _track_leg:
+				# На отрезке с трассой склады стоят после её выхода.
+				var after_track: float = (from.distance_to(track_end) + 300.0) / from.distance_to(to)
+				if on_leg > 1:
+					along = lerpf(minf(after_track, 0.85), 0.95, along)
+				else:
+					# Случайное число то же, что без трассы: остальные склады и
+					# ориентиры от появления трассы не сдвигаются.
+					along = lerpf(minf(after_track, 0.85), 0.9, (along - 0.35) / 0.3)
+			var detour: float = rng.randf_range(params.depot_detour_min, params.depot_detour_max)
+			var side: float = 1.0
+			if rng.randf() < 0.5:
+				side = -1.0
+			var base: Vector2 = from.lerp(to, along)
+			var normal: Vector2 = (to - from).normalized().orthogonal()
+			# Смещение от отрезка подбирается делением пополам под нужный крюк.
+			var low: float = 0.0
+			var high: float = 6000.0
+			for step in 32:
+				var middle: float = (low + high) * 0.5
+				if detour_length(from, base + normal * middle, to) < detour:
+					low = middle
+				else:
+					high = middle
+			var spot: Vector2 = base + normal * low * side
+			var edge: float = 200.0
+			if spot.x < params.area_min.x + edge or spot.x > params.area_max.x - edge \
+					or spot.y < params.area_min.y + edge or spot.y > params.area_max.y - edge:
+				spot = base - normal * low * side
+			list.append(depots.size())
+			depots.append(spot)
+		_depots_by_leg.append(list)
 		from = to
 
 
@@ -244,6 +261,15 @@ func _place_landmarks(params: WorldGenParams, rng: RandomNumberGenerator) -> voi
 		attempts += 1
 		var x: float = rng.randf_range(params.area_min.x + edge, params.area_max.x - edge)
 		var y: float = rng.randf_range(params.area_min.y + edge, params.area_max.y - edge)
+		if params.landmark_corridor > 0.0:
+			# Место рядом с маршрутом: случайная точка линии и смещение вбок.
+			var leg: int = rng.randi() % checkpoints.size()
+			var leg_from: Vector2 = start
+			if leg > 0:
+				leg_from = checkpoints[leg - 1]
+			var on_line: Vector2 = leg_from.lerp(checkpoints[leg], rng.randf())
+			x = clampf(on_line.x + rng.randf_range(-1.0, 1.0) * params.landmark_corridor, params.area_min.x + edge, params.area_max.x - edge)
+			y = clampf(on_line.y + rng.randf_range(-1.0, 1.0) * params.landmark_corridor, params.area_min.y + edge, params.area_max.y - edge)
 		var spot: Vector2 = Vector2(x, y)
 		if spot.distance_to(start) < 250.0:
 			continue

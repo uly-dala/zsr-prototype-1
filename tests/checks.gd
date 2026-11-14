@@ -24,6 +24,8 @@ const RaceLog = preload("res://src/race/race_log.gd")
 const ReplayInput = preload("res://src/input/replay_input.gd")
 const AiParams = preload("res://src/input/ai_params.gd")
 const AiInput = preload("res://src/input/ai_input.gd")
+const RaceParams = preload("res://src/race/race_params.gd")
+const Standings = preload("res://src/race/standings.gd")
 
 const DT: float = 1.0 / 60.0
 ## Скорость 108 км/ч в м/с.
@@ -99,6 +101,12 @@ func run() -> void:
 	_test_rival_basics()
 	_section("Соперники: заезд девяти машин по местности (8)")
 	_test_rival_race()
+	_section("Форматы заезда: короткий, этапы, марафон (2.1)")
+	_test_formats()
+	_section("Таблица этапов и старт с отставаниями (2.3)")
+	_test_standings()
+	_section("Соперники: один этап формата «Этапы» (2.1, 8)")
+	_test_stage_race()
 
 
 # --- Проверки ---------------------------------------------------------------
@@ -1000,7 +1008,7 @@ func _test_track() -> void:
 			order_ok = false
 	_true("ворота стоят в списке между первой и второй точками", order_ok)
 	_true("склад второго отрезка — после выхода с трассы",
-		layout.leg_depots[1] == -1 and layout.leg_depots[4] == -1 and layout.leg_depots[5] == 1
+		layout.leg_depots[1].is_empty() and layout.leg_depots[4].is_empty() and layout.leg_depots[5] == PackedInt32Array([1])
 		and layout.depots[1].distance_to(layout.checkpoints[0]) > layout.track_end.distance_to(layout.checkpoints[0]))
 	var twin: StageLayout = StageLayout.new(world_params)
 	_true("трасса воспроизводима", twin.walls == layout.walls and twin.track_obstacles == layout.track_obstacles)
@@ -1061,7 +1069,7 @@ func _test_track() -> void:
 	gates.checkpoints = PackedVector2Array([Vector2(0.0, 300.0), Vector2(0.0, 600.0)])
 	gates.checkpoint_radius = 40.0
 	gates.checkpoint_radii = PackedFloat32Array([20.0, 40.0])
-	gates.leg_depots = PackedInt32Array([-1, 0])
+	gates.leg_depots = [PackedInt32Array(), PackedInt32Array([0])]
 	runner.state.x = 30.0
 	runner.state.y = 300.0
 	gates.step()
@@ -1069,7 +1077,206 @@ func _test_track() -> void:
 	runner.state.x = 15.0
 	gates.step()
 	_true("в 15 м от ворот — засчитано", runner.next_checkpoint == 1)
-	_true("склад привязан к отрезку после ворот", gates.depot_of_leg(0) == -1 and gates.depot_of_leg(1) == 0)
+	_true("склад привязан к отрезку после ворот", gates.depots_of_leg(0).is_empty() and gates.depots_of_leg(1) == PackedInt32Array([0]))
+
+
+func _test_formats() -> void:
+	var paths: Array = ["res://data/format_short.tres", "res://data/format_stages.tres", "res://data/format_marathon.tres"]
+	var stage_counts: Array = [1, 5, 1]
+	var routes_km: Array = [14.0, 20.0, 100.0]
+	var point_counts: Array = [4, 3, 8]
+	for number in paths.size():
+		var format: RaceParams = load(paths[number]) as RaceParams
+		if format == null or format.world == null:
+			_report(false, "Файл формата не загрузился: %s" % paths[number])
+			continue
+		_true("%s: этапов %d" % [format.title, format.stage_count()], format.stage_count() == stage_counts[number])
+		var seeds_ok: bool = true
+		var inside_ok: bool = true
+		var depots_ok: bool = true
+		var track_ok: bool = true
+		var route_text: String = ""
+		var landmark_text: String = ""
+		var started: int = Time.get_ticks_msec()
+		for stage in format.stage_count():
+			var world_params: WorldGenParams = format.stage_world(stage) as WorldGenParams
+			if world_params.world_seed != format.seeds[stage]:
+				seeds_ok = false
+			var layout: StageLayout = StageLayout.new(world_params)
+			route_text += " %.1f" % (layout.route_length / 1000.0)
+			landmark_text += " %d" % layout.landmarks.size()
+			if layout.checkpoints.size() != point_counts[number]:
+				inside_ok = false
+			if absf(layout.route_length / 1000.0 - routes_km[number]) > routes_km[number] * 0.05:
+				inside_ok = false
+			var places: Array = []
+			for checkpoint in layout.checkpoints:
+				places.append(checkpoint)
+			for depot in layout.depots:
+				places.append(depot)
+			for place in places:
+				if place.x < world_params.area_min.x or place.x > world_params.area_max.x \
+						or place.y < world_params.area_min.y or place.y > world_params.area_max.y:
+					inside_ok = false
+			# Каждый склад привязан ровно к одному месту списка, по порядку.
+			var listed: PackedInt32Array = PackedInt32Array()
+			for list in layout.leg_depots:
+				listed.append_array(list)
+			if layout.depots.size() != world_params.depot_count or listed.size() != layout.depots.size():
+				depots_ok = false
+			for i in listed.size():
+				if listed[i] != i:
+					depots_ok = false
+			if not layout.has_track or layout.gates.size() < 2:
+				track_ok = false
+			if layout.landmarks.size() < int(world_params.landmark_count * 0.8):
+				inside_ok = false
+		_true("%s: у каждого этапа своё зерно" % format.title, seeds_ok)
+		_true("%s: точки и склады внутри местности, длина маршрута, км:%s" % [format.title, route_text], inside_ok)
+		_true("%s: склады привязаны к отрезкам по порядку" % format.title, depots_ok)
+		_true("%s: на каждом этапе есть трасса с воротами" % format.title, track_ok)
+		_info("%s: ориентиров по этапам:%s; расстановка заняла %d мс" % [format.title, landmark_text, Time.get_ticks_msec() - started])
+	# Короткий формат — та же местность, что и раньше.
+	var short_format: RaceParams = load(paths[0]) as RaceParams
+	var plain: WorldGenParams = load("res://data/world_default.tres") as WorldGenParams
+	if short_format != null and short_format.world != null:
+		var from_format: StageLayout = StageLayout.new(short_format.stage_world(0))
+		var direct: StageLayout = StageLayout.new(plain)
+		_true("короткий формат даёт ту же расстановку, что world_default", from_format.checkpoints == direct.checkpoints
+			and from_format.depots == direct.depots)
+	# Марафон: слой данных большой местности создаётся быстро, карта строится полосами.
+	var marathon: RaceParams = load(paths[2]) as RaceParams
+	if marathon != null and marathon.world != null:
+		var world_params: WorldGenParams = marathon.stage_world(0) as WorldGenParams
+		var layout: StageLayout = StageLayout.new(world_params)
+		var started: int = Time.get_ticks_msec()
+		var world: GeneratedTerrain = GeneratedTerrain.new(world_params, _hard, _sand, _slick, layout.clear_zones())
+		_info("марафон: слой данных создан за %d мс, скользких полей %d" % [Time.get_ticks_msec() - started, world.field_count()])
+		var size: Vector2i = MapBuilder.image_size(world, world_params.area_min, world_params.area_max)
+		_true("карта марафона: 1200 × 3600 пикселей", size == Vector2i(1200, 3600))
+		started = Time.get_ticks_msec()
+		var band: PackedByteArray = MapBuilder.build_band(world, world_params.area_min, world_params.area_max, 0, 64)
+		var band_msec: int = Time.get_ticks_msec() - started
+		_true("полоса карты: 64 строки по 1200 пикселей", band.size() == 64 * 1200 * 3)
+		_info("марафон: полоса карты за %d мс; вся карта в одном потоке — около %d с" % [band_msec, int(band_msec * 3600.0 / 64.0 / 1000.0)])
+	# Полосы дают ту же картинку, что и постройка целиком.
+	var small: GeneratedTerrain = _new_world()
+	var whole: Image = MapBuilder.build_image(small, Vector2(-500.0, 0.0), Vector2(500.0, 1000.0))
+	var upper: PackedByteArray = MapBuilder.build_band(small, Vector2(-500.0, 0.0), Vector2(500.0, 1000.0), 0, 13)
+	var lower: PackedByteArray = MapBuilder.build_band(small, Vector2(-500.0, 0.0), Vector2(500.0, 1000.0), 13, 40)
+	var joined: Image = MapBuilder.assemble(Vector2i(40, 40), [upper, lower])
+	_true("карта из полос совпадает с картой целиком", joined.get_data() == whole.get_data())
+
+
+func _test_standings() -> void:
+	var table: Standings = Standings.new()
+	table.setup(PackedStringArray(["А", "Б", "В"]))
+	var zero: PackedFloat64Array = table.start_delays(60.0)
+	_true("первый этап: все стартуют вместе", zero[0] == 0.0 and zero[1] == 0.0 and zero[2] == 0.0)
+	# Этап 1: А — 600 с, Б — 630 с, В не доехал.
+	table.add_stage(PackedFloat64Array([600.0, 630.0, 0.0]), [true, true, false], 300.0, 1800.0)
+	_near("не доехавший: время худшего плюс 5 минут, с", table.totals[2], 930.0, 0.01)
+	var delays: PackedFloat64Array = table.start_delays(60.0)
+	_true("старт с настоящим отставанием 30 с", absf(delays[0]) < 0.01 and absf(delays[1] - 30.0) < 0.01)
+	_near("отставание не больше 60 с между соседними, с", delays[2], 90.0, 0.01)
+	# Этап 2: А — 800 с, Б не доехал, В — 600 с.
+	table.add_stage(PackedFloat64Array([800.0, 0.0, 600.0]), [true, false, true], 300.0, 1800.0)
+	_true("суммы: А 1400, Б 1730, В 1530", absf(table.totals[0] - 1400.0) < 0.01
+		and absf(table.totals[1] - 1730.0) < 0.01 and absf(table.totals[2] - 1530.0) < 0.01)
+	_true("места по сумме времени: А, В, Б", table.order() == PackedInt32Array([0, 2, 1]) and table.place_of(2) == 2)
+	# Этап 3: Б снова не доехал.
+	table.add_stage(PackedFloat64Array([900.0, 0.0, 2000.0]), [true, false, true], 300.0, 1800.0)
+	_true("по сумме: А, В, Б", table.order() == PackedInt32Array([0, 2, 1]))
+	var fast: Standings = Standings.new()
+	fast.setup(PackedStringArray(["А", "Б", "В"]))
+	fast.add_stage(PackedFloat64Array([900.0, 100.0, 950.0]), [true, true, true], 300.0, 1800.0)
+	fast.add_stage(PackedFloat64Array([900.0, 0.0, 950.0]), [true, false, true], 300.0, 1800.0)
+	_true("не доехавший стартует последним, даже если по сумме впереди",
+		fast.order() == PackedInt32Array([1, 0, 2]) and fast.start_order() == PackedInt32Array([0, 2, 1]))
+	_true("если не доехал никто, время — предел этапа плюс штраф", _all_dnf_time() == 2100.0)
+	_true("таблица: по строке на машину", table.table_lines().size() == 3)
+	_true("время длиннее часа пишется с часами", Standings.clock(3725.0) == "1:02:05" and Standings.clock(125.0) == "2:05")
+
+	# Старт с задержкой: машина стоит до своего шага.
+	var race: RaceSim = RaceSim.new(FlatTerrain.new(_hard))
+	var early = race.add_car(_params, 250.0, 0.0, 0.0, 0.0)
+	var late = race.add_car(_params, 250.0, 10.0, 0.0, 0.0)
+	late.start_step = 120
+	race.submit(Command.new(Command.Type.SET_TARGET, 0, Command.TargetMode.SPEED, 60.0))
+	race.submit(Command.new(Command.Type.SET_TARGET, 1, Command.TargetMode.SPEED, 60.0))
+	for step in 120:
+		race.step()
+	_true("до своего старта машина стоит, топливо не тратит", late.state.y == 0.0 and late.state.fuel == 250.0 and early.state.y > 5.0)
+	for step in 120:
+		race.step()
+	_true("после старта машина едет", late.state.y > 5.0)
+	early.halted = true
+	var frozen: float = early.state.y
+	for step in 60:
+		race.step()
+	_true("выбывшая из расчёта машина не меняется", early.state.y == frozen)
+
+
+func _all_dnf_time() -> float:
+	var table: Standings = Standings.new()
+	table.setup(PackedStringArray(["А"]))
+	table.add_stage(PackedFloat64Array([0.0]), [false], 300.0, 1800.0)
+	return table.totals[0]
+
+
+## Девять соперников на первом этапе формата «Этапы»: 20 км, шесть складов.
+func _test_stage_race() -> void:
+	var format: RaceParams = load("res://data/format_stages.tres") as RaceParams
+	var ai_params: AiParams = load("res://data/ai_default.tres") as AiParams
+	if format == null or format.world == null:
+		_report(false, "Файл формата «Этапы» не загрузился")
+		return
+	var world_params: WorldGenParams = format.stage_world(0) as WorldGenParams
+	var layout: StageLayout = StageLayout.new(world_params)
+	var world: GeneratedTerrain = GeneratedTerrain.new(world_params, _hard, _sand, _slick, layout.clear_zones())
+	world.set_extra_obstacles(layout.track_obstacles)
+	var race: RaceSim = RaceSim.new(world)
+	layout.apply_to(race)
+	race.world_state.setup(layout.depots, world_params.depot_stock, world_params.depot_portion,
+		world_params.depot_radius, world_params.depot_max_speed)
+	var rivals: Array = []
+	for kind in 3:
+		for number in 3:
+			var rival: AiInput = AiInput.new(race.cars.size(), kind, number + 1, ai_params, world_params.world_seed)
+			race.add_car(_params, rival.start_fuel(), (rivals.size() - 4) * 7.0, 0.0, 0.0)
+			rivals.append(rival)
+	var limit: int = int(layout.route_length / 1000.0 * format.time_limit_per_km * 60.0)
+	var started: int = Time.get_ticks_msec()
+	var running: bool = true
+	while running and race.step_index < limit:
+		for rival in rivals:
+			rival.decide(race, world, layout.landmarks)
+		race.step()
+		if race.step_index % 600 == 0:
+			running = false
+			for car in race.cars:
+				if car.finish_step < 0 and (car.state.fuel > 0.0 or car.state.speed() > 0.5):
+					running = true
+	var finished: int = 0
+	for rival in rivals:
+		var car = race.cars[rival.car_id]
+		var status: String = "не доехал, взято точек %d, топливо %d кг" % [
+			layout.checkpoints_among(car.next_checkpoint), int(car.state.fuel),
+		]
+		if car.finish_step >= 0:
+			status = "финиш %s, топливо %d кг" % [Standings.clock(car.finish_step * DT), int(car.state.fuel)]
+			finished += 1
+		_info("%s, %d км/ч: %s, путь %.1f км, заправок %d (%d кг), ударов %d" % [
+			rival.title, int(rival.cruise_speed), status, car.state.distance / 1000.0, car.refuels,
+			int(car.fuel_taken), car.hits,
+		])
+	var stock_text: String = ""
+	for value in race.world_state.stock:
+		stock_text += " %d" % int(value)
+	_info("остатки на складах, кг:%s" % stock_text)
+	_info("маршрут %.1f км, расчёт занял %.1f с, шагов %d" % [layout.route_length / 1000.0,
+		(Time.get_ticks_msec() - started) / 1000.0, race.step_index])
+	_true("этап 20 км: доехал хотя бы один соперник (доехало %d из 9)" % finished, finished >= 1)
 
 
 func _test_map() -> void:

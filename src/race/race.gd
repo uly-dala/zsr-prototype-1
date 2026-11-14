@@ -7,7 +7,8 @@ extends Node2D
 ## при движении к точке, местность из генератора с подгрузкой частями,
 ## покрытия, ветер, препятствия, карта, ориентиры, контрольные точки, линейка,
 ## склады топлива и выбор заправки перед стартом, запись заезда и разбор
-## после финиша, девять соперников под управлением ИИ.
+## после финиша, девять соперников под управлением ИИ, форматы заезда
+## (короткий, этапы, марафон), лагерь между этапами, пауза, ускорение времени.
 ##
 ## Узел только связывает части между собой:
 ##   ввод игрока -> команды -> RaceSim (фиксированный шаг 60 раз в секунду)
@@ -29,6 +30,8 @@ const ReplayInput = preload("res://src/input/replay_input.gd")
 const AiParams = preload("res://src/input/ai_params.gd")
 const AiInput = preload("res://src/input/ai_input.gd")
 const RaceSim = preload("res://src/race/race_sim.gd")
+const RaceParams = preload("res://src/race/race_params.gd")
+const Standings = preload("res://src/race/standings.gd")
 const Car = preload("res://src/race/car.gd")
 const Recorder = preload("res://src/race/recorder.gd")
 const PlayerInput = preload("res://src/input/player_input.gd")
@@ -45,7 +48,20 @@ const Command = preload("res://src/sim/command.gd")
 
 const CAR_PARAMS_PATH: String = "res://data/car_default.tres"
 const CAMERA_PARAMS_PATH: String = "res://data/camera_default.tres"
-const WORLD_PARAMS_PATH: String = "res://data/world_default.tres"
+## Форматы заезда (раздел 2.1): короткий, этапы, марафон.
+const FORMAT_PATHS: Array = [
+	"res://data/format_short.tres",
+	"res://data/format_stages.tres",
+	"res://data/format_marathon.tres",
+]
+## Строк картинки карты в одной полосе: полосы строятся в разных потоках.
+const MAP_BAND_ROWS: int = 64
+## Пока машина игрока ждёт своего старта, время идёт во столько раз быстрее.
+const WAIT_SPEEDUP: int = 8
+## Отладка: ускорение времени (раздел 9.5).
+const TIME_SCALES: Array = [1, 4, 16]
+## Сколько миллисекунд за кадр можно считать, пока соперники доезжают этап.
+const SETTLE_BUDGET_MSEC: int = 10
 const AI_PARAMS_PATH: String = "res://data/ai_default.tres"
 ## Соперников каждого типа: спринтер, середняк, экономный (раздел 8).
 const RIVALS_PER_KIND: int = 3
@@ -83,9 +99,27 @@ var _layout: StageLayout
 var _stage_view: StageView
 var _map: MapView
 var _world_params: WorldGenParams
-var _map_task: int = -1
-var _map_image: Image = null
+## Постройка картинки карты: словарь с ключами task, bands, size, terrain,
+## area_min, area_max. Пустой, если карта готова.
+var _map_job: Dictionary = {}
+## Постройки карт прошлых этапов, которые ещё не закончились.
+var _old_map_tasks: Array = []
 var _map_mutex: Mutex = Mutex.new()
+## Форматы заезда и выбранный формат.
+var _formats: Array = []
+var _format_index: int = 0
+## Номер этапа, с нуля.
+var _stage_index: int = 0
+var _standings: Standings = Standings.new()
+## Пауза (раздел 2.2): Esc останавливает симуляцию.
+var _paused: bool = false
+## Игрок закончил этап, соперники доезжают: симуляция считается без показа.
+var _settling: bool = false
+## Отладка: номер ускорения времени в TIME_SCALES.
+var _time_scale_index: int = 0
+## Отладка: машину игрока ведёт ИИ.
+var _auto_drive: bool = false
+var _player_ai: AiInput
 var _map_opened_msec: int = -1
 var _seen_checkpoint: int = 0
 var _seen_refuels: int = 0
@@ -151,12 +185,10 @@ func _ready() -> void:
 	assert(camera_params != null, "Не загружен файл параметров камеры")
 	_camera = CameraRig.new(camera_params)
 
-	var world_params: WorldGenParams = load(WORLD_PARAMS_PATH) as WorldGenParams
-	assert(world_params != null, "Не загружен файл параметров местности")
-	_world_params = world_params
-	_layout = StageLayout.new(world_params)
-	_generated = GeneratedTerrain.new(world_params, _surfaces[0], _surfaces[1], _surfaces[2], _layout.clear_zones())
-	_generated.set_extra_obstacles(_layout.track_obstacles)
+	for path in FORMAT_PATHS:
+		var format: RaceParams = load(path) as RaceParams
+		assert(format != null, "Не загружен файл формата заезда")
+		_formats.append(format)
 	_flat = FlatTerrain.new(_surfaces[0])
 
 	_world = Node2D.new()
@@ -199,44 +231,91 @@ func _ready() -> void:
 	_map = MapView.new()
 	_map.name = "Map"
 	layer.add_child(_map)
-	_map.setup(_generated, _layout, world_params.area_min, world_params.area_max, world_params.map_grid_step)
-	# Картинка карты строится один раз в фоне (раздел 9.4).
-	_map_task = WorkerThreadPool.add_task(_build_map_image)
 
 	_ai_params = load(AI_PARAMS_PATH) as AiParams
 	assert(_ai_params != null, "Не загружен файл параметров соперников")
-	_chosen_fuel = world_params.start_fuel_default
-	_apply_terrain_mode()
+	_load_stage()
 	_start_race()
 
 
 func _exit_tree() -> void:
 	_recorder.stop()
-	if _map_task != -1:
-		WorkerThreadPool.wait_for_task_completion(_map_task)
-		_map_task = -1
+	if not _map_job.is_empty():
+		WorkerThreadPool.wait_for_group_task_completion(_map_job["task"])
+		_map_job = {}
+	for task in _old_map_tasks:
+		WorkerThreadPool.wait_for_group_task_completion(task)
+	_old_map_tasks = []
 
 
-## Работает в фоновом потоке.
-func _build_map_image() -> void:
-	var image: Image = MapBuilder.build_image(_generated, _world_params.area_min, _world_params.area_max)
+func _format() -> RaceParams:
+	return _formats[_format_index]
+
+
+## Гонка из нескольких этапов: с лагерем и общей таблицей (раздел 2.3).
+func _has_stages() -> bool:
+	return _format().stage_count() > 1 and _terrain_mode == 0
+
+
+## Собрать местность этапа _stage_index выбранного формата: слой данных,
+## объекты этапа, карта. Этап — данные: зерно и набор чисел (раздел 2.1).
+func _load_stage() -> void:
+	var world_params: WorldGenParams = _format().stage_world(_stage_index) as WorldGenParams
+	assert(world_params != null, "В файле формата не заданы числа местности")
+	_world_params = world_params
+	_layout = StageLayout.new(world_params)
+	_generated = GeneratedTerrain.new(world_params, _surfaces[0], _surfaces[1], _surfaces[2], _layout.clear_zones())
+	_generated.set_extra_obstacles(_layout.track_obstacles)
+	_map.setup(_generated, _layout, world_params.area_min, world_params.area_max, world_params.map_grid_step)
+	_start_map_build()
+	_chosen_fuel = world_params.start_fuel_default
+	_apply_terrain_mode()
+
+
+## Картинка карты строится один раз в фоне, полосами в нескольких потоках
+## (раздел 9.4).
+func _start_map_build() -> void:
+	if not _map_job.is_empty():
+		# Карта прошлого этапа ещё строится: её итог не понадобится.
+		_old_map_tasks.append(_map_job["task"])
+	var size: Vector2i = MapBuilder.image_size(_generated, _world_params.area_min, _world_params.area_max)
+	var count: int = int(ceil(size.y / float(MAP_BAND_ROWS)))
+	var bands: Array = []
+	bands.resize(count)
+	var job: Dictionary = {
+		"bands": bands,
+		"size": size,
+		"terrain": _generated,
+		"area_min": _world_params.area_min,
+		"area_max": _world_params.area_max,
+	}
+	job["task"] = WorkerThreadPool.add_group_task(_build_map_band.bind(job), count)
+	_map_job = job
+
+
+## Работает в фоновых потоках: одна полоса картинки карты.
+func _build_map_band(index: int, job: Dictionary) -> void:
+	var size: Vector2i = job["size"]
+	var row_from: int = index * MAP_BAND_ROWS
+	var row_to: int = mini(row_from + MAP_BAND_ROWS, size.y)
+	var bytes: PackedByteArray = MapBuilder.build_band(job["terrain"], job["area_min"], job["area_max"], row_from, row_to)
 	_map_mutex.lock()
-	_map_image = image
+	job["bands"][index] = bytes
 	_map_mutex.unlock()
 
 
-## Принять готовую картинку карты из фонового потока.
+## Принять готовую картинку карты из фоновых потоков.
 func _accept_map_image() -> void:
-	if _map_task == -1 or not WorkerThreadPool.is_task_completed(_map_task):
+	for i in range(_old_map_tasks.size() - 1, -1, -1):
+		if WorkerThreadPool.is_group_task_completed(_old_map_tasks[i]):
+			WorkerThreadPool.wait_for_group_task_completion(_old_map_tasks[i])
+			_old_map_tasks.remove_at(i)
+	if _map_job.is_empty() or not WorkerThreadPool.is_group_task_completed(_map_job["task"]):
 		return
-	WorkerThreadPool.wait_for_task_completion(_map_task)
-	_map_task = -1
-	_map_mutex.lock()
-	var image: Image = _map_image
-	_map_image = null
-	_map_mutex.unlock()
-	if image != null:
-		_map.set_texture(ImageTexture.create_from_image(image))
+	WorkerThreadPool.wait_for_group_task_completion(_map_job["task"])
+	var image: Image = MapBuilder.assemble(_map_job["size"], _map_job["bands"])
+	_map_job = {}
+	_map.set_texture(ImageTexture.create_from_image(image))
 
 
 ## Начать заезд заново: машина в начале координат, носом на север.
@@ -248,6 +327,8 @@ func _start_race() -> void:
 	_notice_left = 0.0
 	_race_log = RaceLog.new()
 	_finished = false
+	_paused = false
+	_settling = false
 	_review.hide_review()
 	_map.review_mode = false
 	_map.review_events = []
@@ -257,6 +338,17 @@ func _start_race() -> void:
 		fuel = _chosen_fuel
 	_player = _sim.add_car(_car_params, fuel, 0.0, 0.0, 0.0)
 	_add_rivals()
+	_player_ai = AiInput.new(_player.id, AiInput.Kind.MIDDLE, 0, _ai_params, _world_params.world_seed)
+	if _has_stages():
+		if _standings.names.size() != _sim.cars.size():
+			var names: PackedStringArray = PackedStringArray(["Игрок"])
+			for rival in _rivals:
+				names.append(rival.title)
+			_standings.setup(names)
+		# Старт этапа: в порядке суммарного времени, с отставаниями (раздел 2.3).
+		var delays: PackedFloat64Array = _standings.start_delays(_format().start_gap_max)
+		for i in _sim.cars.size():
+			_sim.cars[i].start_step = int(round(delays[i] * RaceSim.STEPS_PER_SECOND))
 	# На местности из генератора заезд начинается с экрана выбора заправки.
 	_prestart = _terrain_mode == 0
 	_map.set_open(_prestart)
@@ -274,27 +366,43 @@ func _start_race() -> void:
 
 
 func _physics_process(_delta: float) -> void:
-	if _prestart or _finished:
+	if _prestart or _finished or _paused or _settling:
 		return
-	for _i in steps_per_tick:
-		_player_input.poll(_sim)
+	var steps: int = steps_per_tick * TIME_SCALES[_time_scale_index]
+	if _sim.step_index < _player.start_step:
+		# Машина игрока ждёт своего старта: ожидание проматывается.
+		steps = maxi(steps, WAIT_SPEEDUP)
+	for _i in steps:
+		if _auto_drive:
+			_player_ai.decide(_sim, _terrain, _layout.landmarks)
+		else:
+			_player_input.poll(_sim)
 		for rival in _rivals:
 			rival.decide(_sim, _terrain, _layout.landmarks)
 		_store_previous()
 		_sim.step()
-		_recorder.sample(_sim.step_index, _sim.time_seconds(), _player, _surface_under_player().id, _map.is_open)
+		if _sim.step_index <= _player.start_step:
+			continue
+		_recorder.sample(_sim.step_index, _stage_seconds(), _player, _surface_under_player().id, _map.is_open)
 		if _sim.step_index % TRAIL_EVERY == 0:
 			_trail.add_point(Vector2(_player.state.x, -_player.state.y))
 		if _sim.step_index % 60 == 0:
 			_true_trail.append(Vector2(_player.state.x, _player.state.y))
-		_race_log.record(_sim.step_index, _sim.time_seconds(), _player, _map.is_open)
+		_race_log.record(_sim.step_index, _stage_seconds(), _player, _map.is_open)
 		# Заезд окончен на финише или когда машина встала с пустым баком (раздел 2.2).
 		if _player.finish_step >= 0 or (_player.state.fuel <= 0.0 and _player.state.speed() < 0.5):
 			_finish_race()
 			return
 
 
+## Время игрока на этапе, с: от его собственного старта.
+func _stage_seconds() -> float:
+	return maxf(0.0, (_sim.step_index - _player.start_step) * RaceSim.DT)
+
+
 func _process(delta: float) -> void:
+	if _settling:
+		_settle_rivals()
 	# Сдвиг камеры стрелками: стрелка вверх открывает обзор вперёд,
 	# машина при этом уходит по экрану вниз.
 	var shift: Vector2 = Vector2.ZERO
@@ -376,13 +484,23 @@ func _process(delta: float) -> void:
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey:
 		var key: InputEventKey = event as InputEventKey
+		if _settling:
+			return
 		if _finished:
 			if key.pressed and not key.echo and (key.physical_keycode == KEY_R
 					or key.physical_keycode == KEY_ENTER or key.physical_keycode == KEY_KP_ENTER):
-				_start_race()
+				_after_review()
 		elif _prestart:
-			if key.pressed:
+			# Повтор при удержании нужен только стрелкам заправки: иначе
+			# удержанный Enter из лагеря сразу начал бы этап.
+			if key.pressed and (not key.echo or key.physical_keycode == KEY_UP or key.physical_keycode == KEY_DOWN):
 				_on_prestart_key(key.physical_keycode)
+		elif key.physical_keycode == KEY_ESCAPE:
+			if key.pressed and not key.echo:
+				_set_paused(not _paused)
+		elif _paused:
+			# На паузе работает только Esc.
+			return
 		elif key.physical_keycode == KEY_M:
 			if not key.echo:
 				_on_map_key(key.pressed)
@@ -393,6 +511,8 @@ func _unhandled_input(event: InputEvent) -> void:
 			_player_input.adjust_course(_sim, 1.0)
 		elif key.pressed and not key.echo:
 			_on_key(key.physical_keycode)
+	elif _paused or _settling:
+		return
 	elif event is InputEventMouseButton:
 		var button: InputEventMouseButton = event as InputEventMouseButton
 		if button.button_index == MOUSE_BUTTON_MIDDLE:
@@ -435,11 +555,21 @@ func _on_key(keycode: int) -> void:
 		KEY_O:
 			_odometer_zero = _player.state.distance
 		KEY_R:
-			_start_race()
+			_restart_format()
 		KEY_T:
 			_terrain_mode = (_terrain_mode + 1) % 4
 			_apply_terrain_mode()
-			_start_race()
+			_restart_format()
+		KEY_F9:
+			# Отладка: ускорение времени ×1, ×4, ×16 (раздел 9.5).
+			_time_scale_index = (_time_scale_index + 1) % TIME_SCALES.size()
+			_race_log.debug_used = true
+		KEY_F10:
+			# Отладка: машину игрока ведёт ИИ — для проверки длинных форматов.
+			_auto_drive = not _auto_drive
+			_race_log.debug_used = true
+			if not _auto_drive:
+				_sim.submit(Command.new(Command.Type.MANUAL, _player.id, 0.0, 0.0))
 		KEY_F1:
 			_map.show_truth = not _map.show_truth
 		KEY_F3:
@@ -626,12 +756,78 @@ func _add_rivals() -> void:
 			slot += 1
 
 
-## Конец заезда: сохранить повтор и открыть разбор (раздел 7.5).
+## Конец заезда игрока: сохранить повтор. В гонке из этапов соперники
+## сначала доезжают этап, потом открывается разбор; иначе разбор сразу.
 func _finish_race() -> void:
-	_finished = true
-	_race_log.close(_sim.time_seconds(), _player)
+	_race_log.close(_stage_seconds(), _player)
 	_save_replay()
 	_recorder.stop()
+	# Машина игрока больше не считается: её итог не должен меняться.
+	_player.halted = true
+	if _has_stages():
+		_settling = true
+		_map.set_open(false)
+		return
+	_show_review()
+
+
+## Сколько шагов даётся машине на этап, считая от её старта.
+func _stage_limit_steps() -> int:
+	return int(_layout.route_length / 1000.0 * _format().time_limit_per_km * RaceSim.STEPS_PER_SECOND)
+
+
+## Закончила ли машина этап: финиш, пустой бак или вышло время.
+func _car_done(car) -> bool:
+	if car.halted or car.finish_step >= 0:
+		return true
+	if car.state.fuel <= 0.0 and car.state.speed() < 0.5:
+		return true
+	return _sim.step_index - car.start_step >= _stage_limit_steps()
+
+
+## Соперники доезжают этап без игрока: симуляция считается так быстро, как
+## успевает, не дольше SETTLE_BUDGET_MSEC за кадр.
+func _settle_rivals() -> void:
+	var started: int = Time.get_ticks_msec()
+	while Time.get_ticks_msec() - started < SETTLE_BUDGET_MSEC:
+		var all_done: bool = true
+		for car in _sim.cars:
+			if not _car_done(car):
+				all_done = false
+		if all_done:
+			_close_stage()
+			return
+		for _i in 60:
+			for rival in _rivals:
+				rival.decide(_sim, _terrain, _layout.landmarks)
+			_sim.step()
+
+
+## Сколько соперников ещё едут этап.
+func _rivals_running() -> int:
+	var running: int = 0
+	for rival in _rivals:
+		if not _car_done(_sim.cars[rival.car_id]):
+			running += 1
+	return running
+
+
+## Этап закончен для всех: записать времена в таблицу и открыть разбор.
+func _close_stage() -> void:
+	_settling = false
+	var times: PackedFloat64Array = PackedFloat64Array()
+	var finished: Array = []
+	for car in _sim.cars:
+		finished.append(car.finish_step >= 0)
+		times.append(maxf(0.0, (car.finish_step - car.start_step) * RaceSim.DT))
+	_standings.add_stage(times, finished, _format().dnf_penalty, _stage_limit_steps() * RaceSim.DT)
+	_show_review()
+
+
+## Разбор после финиша (раздел 7.5); в гонке из этапов это экран лагеря
+## (раздел 2.3): таблица, разбор этапа, дальше — карта следующего этапа.
+func _show_review() -> void:
+	_finished = true
 	_map.review_mode = true
 	_map.review_events = _race_log.events
 	_map.true_trail = _race_log.path
@@ -639,7 +835,54 @@ func _finish_race() -> void:
 	var title: String = "ТОПЛИВО КОНЧИЛОСЬ"
 	if _player.finish_step >= 0:
 		title = "ФИНИШ"
+	_review.footer = "R или Enter — новый заезд"
+	if _has_stages():
+		var count: int = _format().stage_count()
+		if _stage_index + 1 < count:
+			title = "ЛАГЕРЬ: этап %d из %d — %s" % [_stage_index + 1, count, title.to_lower()]
+			_review.footer = "Enter — карта следующего этапа и заправка"
+		else:
+			title = "ИТОГ ГОНКИ: место %d из %d" % [_standings.place_of(_player.id), _sim.cars.size()]
+			_review.footer = "R или Enter — новая гонка"
 	_review.show_review(_race_log, title, _review_lines())
+
+
+## После разбора: следующий этап или новая гонка.
+func _after_review() -> void:
+	if _has_stages() and _stage_index + 1 < _format().stage_count():
+		_stage_index += 1
+		_load_stage()
+		_start_race()
+		return
+	_restart_format()
+
+
+## Начать формат с первого этапа: таблица обнуляется.
+func _restart_format() -> void:
+	_standings = Standings.new()
+	if _stage_index != 0:
+		_stage_index = 0
+		_load_stage()
+	_start_race()
+
+
+## Сменить формат: короткий, этапы, марафон.
+func _change_format(step: int) -> void:
+	_format_index = posmod(_format_index + step, _formats.size())
+	_stage_index = 0
+	_standings = Standings.new()
+	_load_stage()
+	_start_race()
+
+
+## Пауза: симуляция стоит, карта закрыта — иначе её можно было бы изучать
+## бесплатно, а время на карте должно оплачиваться вниманием (раздел 7.2).
+func _set_paused(paused: bool) -> void:
+	_paused = paused
+	if paused:
+		_map.set_open(false)
+		_map_opened_msec = -1
+		_right_down = false
 
 
 ## Строки итогов для разбора. Здесь же числа для критериев раздела 10.
@@ -649,10 +892,10 @@ func _review_lines() -> PackedStringArray:
 	var lines: PackedStringArray = PackedStringArray()
 	if _sim.cars.size() > 1:
 		lines.append("место %d из %d     время %s     осталось топлива %d кг" % [
-			_sim.place_of(_player.id), _sim.cars.size(), _clock(_sim.time_seconds()), roundi(s.fuel),
+			_sim.place_of(_player.id), _sim.cars.size(), _clock(_race_log.end_time), roundi(s.fuel),
 		])
 	else:
-		lines.append("время %s     осталось топлива %d кг" % [_clock(_sim.time_seconds()), roundi(s.fuel)])
+		lines.append("время %s     осталось топлива %d кг" % [_clock(_race_log.end_time), roundi(s.fuel)])
 	var total: int = _sim.checkpoints.size()
 	if total > 0:
 		lines.append("контрольных точек взято %d из %d" % [
@@ -691,15 +934,19 @@ func _review_lines() -> PackedStringArray:
 				roundi(leg["distance"] - straight),
 			])
 			from = _layout.waypoints[i]
+	# Гонка из этапов: таблица после этапа, время на этапе и суммарное.
+	if _has_stages() and _standings.stages_done() > 0:
+		lines.append("")
+		lines.append_array(_standings.table_lines())
 	# Соперники на момент конца заезда игрока.
-	if not _rivals.is_empty():
+	elif not _rivals.is_empty():
 		lines.append("")
 		for rival in _rivals:
 			var car = _sim.cars[rival.car_id]
 			var taken: int = _layout.checkpoints_among(car.next_checkpoint)
 			var status: String = "в пути, взято точек %d" % taken
 			if car.finish_step >= 0:
-				status = "финиш %s" % _clock(car.finish_step * RaceSim.DT)
+				status = "финиш %s" % _clock((car.finish_step - car.start_step) * RaceSim.DT)
 			elif car.state.fuel <= 0.0:
 				status = "пустой бак, взято точек %d" % taken
 			lines.append("%d. %s: %s, заправок %d, ударов %d" % [
@@ -712,8 +959,7 @@ func _review_lines() -> PackedStringArray:
 
 
 func _clock(seconds: float) -> String:
-	var whole: int = int(seconds)
-	return "%d:%02d" % [int(whole / 60.0), whole % 60]
+	return Standings.clock(seconds)
 
 
 ## Повтор: зерно, заправка и команды с номерами шагов (раздел 9.2).
@@ -722,6 +968,9 @@ func _save_replay() -> void:
 	_recorder.save_replay({
 		"version": 1,
 		"world_seed": _world_params.world_seed,
+		"format": _format().title,
+		"stage": _stage_index,
+		"start_step": _player.start_step,
 		"terrain_mode": _terrain_mode,
 		"start_fuel": _chosen_fuel if _terrain_mode == 0 else start_fuel,
 		"steps": _sim.step_index,
@@ -736,17 +985,24 @@ func _save_replay() -> void:
 func _on_prestart_key(keycode: int) -> void:
 	var params: WorldGenParams = _world_params
 	match keycode:
-		KEY_UP, KEY_RIGHT:
+		KEY_UP:
 			_set_start_fuel(_chosen_fuel + params.start_fuel_step)
-		KEY_DOWN, KEY_LEFT:
+		KEY_DOWN:
 			_set_start_fuel(_chosen_fuel - params.start_fuel_step)
+		KEY_LEFT:
+			# Формат меняется только перед первым этапом.
+			if _stage_index == 0:
+				_change_format(-1)
+		KEY_RIGHT:
+			if _stage_index == 0:
+				_change_format(1)
 		KEY_ENTER, KEY_KP_ENTER, KEY_SPACE:
 			_prestart = false
 			_map.set_open(false)
 		KEY_T:
 			_terrain_mode = (_terrain_mode + 1) % 4
 			_apply_terrain_mode()
-			_start_race()
+			_restart_format()
 
 
 func _set_start_fuel(fuel: float) -> void:
@@ -760,8 +1016,17 @@ func _prestart_text() -> String:
 	var sim = _player.sim
 	var reach_slow: float = sim.range_at_speed(90.0 / 3.6, _chosen_fuel, _surfaces[0]) / 1000.0
 	var reach_fast: float = sim.range_at_speed(108.0 / 3.6, _chosen_fuel, _surfaces[0]) / 1000.0
-	return "Заправка %d кг (стрелки вверх и вниз)     хватит на %.1f км при 90 км/ч, %.1f км при 108     маршрут %.0f км     Enter — старт" % [
-		roundi(_chosen_fuel), reach_slow, reach_fast, _layout.route_length / 1000.0,
+	var format: RaceParams = _format()
+	var head: String = "Формат: %s (стрелки влево и вправо)" % format.title
+	if format.stage_count() > 1:
+		head = "Формат: %s, этап %d из %d" % [format.title, _stage_index + 1, format.stage_count()]
+		if _stage_index == 0:
+			head += " (стрелки влево и вправо — сменить формат)"
+		elif _player.start_step > 0:
+			head += "     ваш старт через %s после лидера" % _clock(_player.start_step * RaceSim.DT)
+	head += "     контрольных точек %d, складов %d" % [_layout.checkpoints.size(), _layout.depots.size()]
+	return "%s\nЗаправка %d кг (стрелки вверх и вниз)     хватит на %.1f км при 90 км/ч, %.1f км при 108     маршрут %.0f км     Enter — старт" % [
+		head, roundi(_chosen_fuel), reach_slow, reach_fast, _layout.route_length / 1000.0,
 	]
 
 
@@ -808,7 +1073,7 @@ func _build_hud_text() -> String:
 	var s = _player.state
 	var sample = _terrain.sample(s.x, s.y)
 	var surface: SurfaceParams = sample.surface
-	var seconds: int = int(_sim.time_seconds())
+	var seconds: int = int(_stage_seconds())
 	var hold_speed: bool = _player.target_mode == Command.TargetMode.SPEED
 
 	# Экран заезда (раздел 7.4). В скобках — заданное значение того, что держит
@@ -842,6 +1107,24 @@ func _build_hud_text() -> String:
 			range_text = "%.1f" % (range_m / 1000.0)
 
 	var lines: PackedStringArray = PackedStringArray()
+	if _settling:
+		lines.append("СОПЕРНИКИ ДОЕЗЖАЮТ ЭТАП: в пути %d, время этапа %s" % [_rivals_running(), _clock(_sim.time_seconds())])
+	elif _paused:
+		lines.append("ПАУЗА     Esc — продолжить")
+	elif _sim.step_index < _player.start_step:
+		lines.append("ВАШ СТАРТ ЧЕРЕЗ %d с     ожидание проматывается" % ceili((_player.start_step - _sim.step_index) * RaceSim.DT))
+	if _has_stages():
+		var total_text: String = "—"
+		if _standings.stages_done() > 0:
+			total_text = _clock(_standings.totals[_player.id])
+		lines.append("%s: этап %d из %d     сумма прошлых этапов %s" % [
+			_format().title, _stage_index + 1, _format().stage_count(), total_text,
+		])
+	if TIME_SCALES[_time_scale_index] != 1 or _auto_drive:
+		var driver_text: String = ""
+		if _auto_drive:
+			driver_text = "     машину ведёт ИИ"
+		lines.append("ОТЛАДКА: время ×%d%s" % [TIME_SCALES[_time_scale_index], driver_text])
 	lines.append("режим: %s%s" % [mode_text, control_text])
 	lines.append("скорость %d км/ч  (%s)" % [roundi(s.speed() * 3.6), speed_note])
 	lines.append("расход %d кг/мин  (%s)" % [roundi(s.consumption), rate_note])
@@ -851,7 +1134,7 @@ func _build_hud_text() -> String:
 	var total: int = _sim.checkpoints.size()
 	if total > 0:
 		if _player.finish_step >= 0:
-			var finish_seconds: int = int(_player.finish_step * RaceSim.DT)
+			var finish_seconds: int = int((_player.finish_step - _player.start_step) * RaceSim.DT)
 			lines.append("ФИНИШ     время %d:%02d     осталось топлива %d кг" % [
 				int(finish_seconds / 60.0), finish_seconds % 60, roundi(s.fuel),
 			])
@@ -923,4 +1206,5 @@ func _build_hud_text() -> String:
 	lines.append("правая кнопка — точка (с Ctrl, Alt — перенос на экране)     X — убрать точку     V — режим камеры     H — возврат камеры")
 	lines.append("1 2 3 — зум     стрелки или средняя кнопка — сдвиг камеры     щелчок средней — вернуть камеру")
 	lines.append("[ ] — топливо ±50 кг     T — местность или плоскость     F — расход топлива     R — заново     F2 — скрыть     F3 — части")
+	lines.append("Esc — пауза     F9 — время ×1, ×4, ×16     F10 — машину ведёт ИИ")
 	return "\n".join(lines)

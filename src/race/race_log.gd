@@ -24,6 +24,8 @@ var events: Array = []
 ## времени и пути ушло на отрезок до очередной контрольной точки.
 var legs: Array = []
 
+## Время заезда игрока на момент его конца, с.
+var end_time: float = 0.0
 ## Счётчики шагов для критериев успеха.
 var steps: int = 0
 var manual_steps: int = 0
@@ -79,6 +81,7 @@ func record(step_index: int, time: float, car: Car, map_open: bool) -> void:
 
 ## Последняя точка пути и графиков: вызывается в конце заезда.
 func close(time: float, car: Car) -> void:
+	end_time = time
 	_sample(time, car.state)
 
 

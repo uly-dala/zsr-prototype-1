@@ -49,6 +49,10 @@ var points_dropped: int = 0
 var points_rejected: int = 0
 ## Номер следующей контрольной точки, с нуля. Равен числу точек после финиша.
 var next_checkpoint: int = 0
+## Шаг симуляции, с которого машина стартует: до него она стоит (раздел 2.3).
+var start_step: int = 0
+## Машина выбыла из расчёта: её состояние больше не меняется.
+var halted: bool = false
 ## Шаги симуляции, на которых пройдены контрольные точки.
 var checkpoint_steps: PackedInt32Array = PackedInt32Array()
 ## Шаг финиша или -1.
